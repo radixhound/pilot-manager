@@ -12,6 +12,10 @@ import {
   getServiceStatus, getServicePid,
   logPath, plistPath, resolveDaemonEntry,
 } from './launchd.js';
+import {
+  registerProject, deregisterProject, registerAll,
+  checkTokenStatus,
+} from './registrar.js';
 
 const HELP = `
 pilot-manager — Per-machine supervisor for claude-session-daemon instances
@@ -33,6 +37,12 @@ Service Commands:
   restart [name]                 Stop + regenerate plist + start
   reinstall [name]               Alias for restart (picks up config changes)
   logs <name> [--stdout]         Tail a daemon's log
+
+Registration Commands:
+  register [name] [--server URL] [--force]  Register with Rails server
+  deregister [name]              Revoke token and clear from config
+  token <name> [--reveal]        Show auth token for a project
+  setup <dir> [--server URL] [--yes]  Scan + register + install in one step
 
 Other:
   version                        Show version
@@ -339,6 +349,119 @@ function cmdLogs(positionals, args) {
   }
 }
 
+async function cmdRegister(positionals, args) {
+  const options = {};
+  if (args.server) options.server = args.server;
+  if (args.force) options.force = true;
+
+  if (positionals.length > 0) {
+    const name = positionals[0];
+    try {
+      const project = getProject(name);
+      if (project?.auth_token && !args.force) {
+        console.log(`"${name}" is already registered. Use --force to re-register.`);
+        return;
+      }
+      const result = await registerProject(name, options);
+      console.log(`Registered "${name}" — token: ${result.auth_token?.slice(0, 8)}...`);
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  } else {
+    const results = await registerAll(options);
+    for (const r of results) {
+      if (r.success) {
+        console.log(`Registered "${r.name}" — token: ${r.auth_token?.slice(0, 8)}...`);
+      } else if (r.skipped) {
+        console.log(`Skipped "${r.name}" (${r.error})`);
+      } else {
+        console.error(`Failed "${r.name}": ${r.error}`);
+      }
+    }
+    const ok = results.filter(r => r.success).length;
+    console.log(`\n${ok}/${results.length} projects registered.`);
+  }
+}
+
+async function cmdDeregister(positionals) {
+  const name = positionals[0];
+  if (!name) {
+    console.error('Error: project name is required. Usage: pilot-manager deregister <name>');
+    process.exit(1);
+  }
+
+  try {
+    await deregisterProject(name);
+    console.log(`Deregistered "${name}" — token revoked and cleared.`);
+  } catch (err) {
+    console.error(`Error: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+function cmdToken(positionals, args) {
+  const name = positionals[0];
+  if (!name) {
+    console.error('Error: project name is required. Usage: pilot-manager token <name> [--reveal]');
+    process.exit(1);
+  }
+
+  const project = getProject(name);
+  if (!project) {
+    console.error(`Error: Project "${name}" not found`);
+    process.exit(1);
+  }
+
+  if (!project.auth_token) {
+    console.log(`No token for "${name}". Run: pilot-manager register ${name}`);
+    return;
+  }
+
+  if (args.reveal) {
+    console.log(project.auth_token);
+  } else {
+    console.log(`${project.auth_token.slice(0, 8)}...(use --reveal to show full token)`);
+  }
+}
+
+async function cmdSetup(positionals, args) {
+  const parentDir = positionals[0];
+  if (!parentDir) {
+    console.error('Error: parent directory is required. Usage: pilot-manager setup <dir> [--server URL] [--yes]');
+    process.exit(1);
+  }
+
+  // Step 1: Init if needed
+  const config = loadConfig();
+  if (args.server) {
+    config.server_url = args.server;
+    saveConfig(config);
+  }
+  ensureConfigDir();
+
+  // Step 2: Scan
+  console.log('--- Scanning for projects ---');
+  await cmdScan(positionals, { ...args, yes: args.yes });
+
+  // Step 3: Register
+  console.log('\n--- Registering with server ---');
+  const regResults = await registerAll({ server: args.server });
+  for (const r of regResults) {
+    if (r.success) {
+      console.log(`Registered "${r.name}"`);
+    } else if (r.skipped) {
+      console.log(`Skipped "${r.name}" (already registered)`);
+    } else {
+      console.error(`Failed "${r.name}": ${r.error}`);
+    }
+  }
+
+  // Step 4: Install
+  console.log('\n--- Installing launchd services ---');
+  cmdInstall([]);
+}
+
 function cmdVersion() {
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   console.log(`pilot-manager: @radnine/claude-pilot-manager@${pkg.version}`);
@@ -388,6 +511,9 @@ export async function run(argv) {
       options: {
         name: { type: 'string' },
         port: { type: 'string' },
+        server: { type: 'string' },
+        force: { type: 'boolean', default: false },
+        reveal: { type: 'boolean', default: false },
         yes: { type: 'boolean', short: 'y', default: false },
         help: { type: 'boolean', short: 'h', default: false },
         stdout: { type: 'boolean', default: false },
@@ -440,6 +566,18 @@ export async function run(argv) {
       break;
     case 'logs':
       cmdLogs(parsed.positionals, parsed.values);
+      break;
+    case 'register':
+      await cmdRegister(parsed.positionals, parsed.values);
+      break;
+    case 'deregister':
+      await cmdDeregister(parsed.positionals);
+      break;
+    case 'token':
+      cmdToken(parsed.positionals, parsed.values);
+      break;
+    case 'setup':
+      await cmdSetup(parsed.positionals, parsed.values);
       break;
     default:
       console.error(`Unknown command: ${command}\nRun "pilot-manager help" for usage.`);
