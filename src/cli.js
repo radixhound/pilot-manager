@@ -2,21 +2,39 @@ import { parseArgs } from 'node:util';
 import path from 'node:path';
 import fs from 'node:fs';
 import readline from 'node:readline';
+import { execSync } from 'node:child_process';
 import { loadConfig, saveConfig } from './config.js';
 import { addProject, removeProject, listProjects, getProject } from './registry.js';
-import { ensureConfigDir } from './paths.js';
+import { ensureConfigDir, LOGS_DIR } from './paths.js';
+import {
+  installService, uninstallService, restartService,
+  installAll, uninstallAll,
+  getServiceStatus, getServicePid,
+  logPath, plistPath, resolveDaemonEntry,
+} from './launchd.js';
 
 const HELP = `
 pilot-manager — Per-machine supervisor for claude-session-daemon instances
 
 Usage: pilot-manager <command> [options]
 
-Commands:
+Registry Commands:
   init                           Interactive setup, writes config.yml
   add <path> [--name X] [--port N]  Add a project to the registry
   remove <name>                  Remove a project from the registry
   list                           List all registered projects
   scan <parent-dir> [--yes]      Auto-discover projects in subdirs
+
+Service Commands:
+  install [name]                 Generate plist + start via launchd (all or one)
+  uninstall [name]               Stop + remove plist (all or one)
+  start [name]                   Start service via launchctl load
+  stop [name]                    Stop service via launchctl unload
+  restart [name]                 Stop + regenerate plist + start
+  reinstall [name]               Alias for restart (picks up config changes)
+  logs <name> [--stdout]         Tail a daemon's log
+
+Other:
   version                        Show version
   help                           Show this help
 
@@ -109,24 +127,29 @@ function cmdList() {
 
   const nameWidth = Math.max(4, ...projects.map(p => p.name.length)) + 2;
   const portWidth = 6;
+  const pidWidth = 8;
+  const statusWidth = 14;
   const pathWidth = Math.max(4, ...projects.map(p => p.path.length)) + 2;
 
   const header = [
     'NAME'.padEnd(nameWidth),
     'PORT'.padEnd(portWidth),
-    'PATH'.padEnd(pathWidth),
-    'STATUS',
+    'PID'.padEnd(pidWidth),
+    'STATUS'.padEnd(statusWidth),
+    'PATH',
   ].join('  ');
 
   console.log(header);
 
   for (const p of projects) {
-    const status = 'not installed'; // Phase 2 will enhance this
+    const status = getServiceStatus(p.name);
+    const pid = getServicePid(p.name);
     const line = [
       p.name.padEnd(nameWidth),
       String(p.port).padEnd(portWidth),
-      p.path.padEnd(pathWidth),
-      status,
+      (pid ? String(pid) : '-').padEnd(pidWidth),
+      status.padEnd(statusWidth),
+      p.path,
     ].join('  ');
     console.log(line);
   }
@@ -197,9 +220,150 @@ async function cmdScan(positionals, args) {
   console.log(`\n${added} project(s) added.`);
 }
 
+function cmdInstall(positionals) {
+  if (positionals.length > 0) {
+    const name = positionals[0];
+    try {
+      installService(name);
+      const pid = getServicePid(name);
+      console.log(`Installed "${name}"${pid ? ` (PID ${pid})` : ''}`);
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  } else {
+    const results = installAll();
+    for (const r of results) {
+      if (r.success) {
+        console.log(`Installed "${r.name}"${r.pid ? ` (PID ${r.pid})` : ''}`);
+      } else {
+        console.error(`Failed "${r.name}": ${r.error}`);
+      }
+    }
+    const ok = results.filter(r => r.success).length;
+    console.log(`\n${ok}/${results.length} services installed.`);
+  }
+}
+
+function cmdUninstall(positionals) {
+  if (positionals.length > 0) {
+    const name = positionals[0];
+    try {
+      uninstallService(name);
+      console.log(`Uninstalled "${name}"`);
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  } else {
+    const results = uninstallAll();
+    for (const r of results) {
+      if (r.success) {
+        console.log(`Uninstalled "${r.name}"`);
+      } else {
+        console.error(`Failed "${r.name}": ${r.error}`);
+      }
+    }
+    console.log(`\n${results.filter(r => r.success).length}/${results.length} services uninstalled.`);
+  }
+}
+
+function cmdStart(positionals) {
+  const names = positionals.length > 0 ? [positionals[0]] : listProjects().map(p => p.name);
+  for (const name of names) {
+    const pp = plistPath(name);
+    if (!fs.existsSync(pp)) {
+      console.error(`"${name}" is not installed. Run: pilot-manager install ${name}`);
+      continue;
+    }
+    try {
+      execSync(`launchctl load "${pp}"`, { encoding: 'utf8' });
+      console.log(`Started "${name}"`);
+    } catch (err) {
+      console.error(`Failed to start "${name}": ${err.message}`);
+    }
+  }
+}
+
+function cmdStop(positionals) {
+  const names = positionals.length > 0 ? [positionals[0]] : listProjects().map(p => p.name);
+  for (const name of names) {
+    const pp = plistPath(name);
+    if (!fs.existsSync(pp)) {
+      console.log(`"${name}" is not installed. Nothing to stop.`);
+      continue;
+    }
+    try {
+      execSync(`launchctl unload "${pp}"`, { encoding: 'utf8' });
+      console.log(`Stopped "${name}"`);
+    } catch {
+      console.log(`"${name}" was not running.`);
+    }
+  }
+}
+
+function cmdRestart(positionals) {
+  const names = positionals.length > 0 ? [positionals[0]] : listProjects().map(p => p.name);
+  for (const name of names) {
+    try {
+      restartService(name);
+      const pid = getServicePid(name);
+      console.log(`Restarted "${name}"${pid ? ` (PID ${pid})` : ''}`);
+    } catch (err) {
+      console.error(`Failed to restart "${name}": ${err.message}`);
+    }
+  }
+}
+
+function cmdLogs(positionals, args) {
+  const name = positionals[0];
+  if (!name) {
+    console.error('Error: project name is required. Usage: pilot-manager logs <name> [--stdout]');
+    process.exit(1);
+  }
+
+  const stream = args.stdout ? 'stdout' : 'stderr';
+  const lp = logPath(name, stream);
+
+  if (!fs.existsSync(lp)) {
+    console.error(`No log file found at ${lp}`);
+    console.error('Is the service installed? Run: pilot-manager install ' + name);
+    process.exit(1);
+  }
+
+  const lines = args.lines ? parseInt(args.lines, 10) : 50;
+  try {
+    execSync(`tail -n ${lines} -f "${lp}"`, { stdio: 'inherit' });
+  } catch {
+    // User pressed Ctrl+C — normal exit
+  }
+}
+
 function cmdVersion() {
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   console.log(`pilot-manager: @radnine/claude-pilot-manager@${pkg.version}`);
+
+  const daemonEntry = resolveDaemonEntry();
+  if (daemonEntry) {
+    try {
+      const daemonPkg = path.resolve(daemonEntry, '..', '..', 'package.json');
+      if (fs.existsSync(daemonPkg)) {
+        const dpkg = JSON.parse(fs.readFileSync(daemonPkg, 'utf8'));
+        console.log(`daemon:         @radnine/claude-session-daemon@${dpkg.version}`);
+      }
+    } catch {
+      // ignore
+    }
+  } else {
+    console.log('daemon:         not found');
+  }
+
+  console.log(`node:           ${process.version}`);
+
+  const projects = listProjects();
+  const installed = projects.filter(p => getServiceStatus(p.name) !== 'not installed').length;
+  const running = projects.filter(p => getServiceStatus(p.name) === 'running').length;
+  console.log(`launchd agents: ${installed} installed, ${running} running`);
 }
 
 export async function run(argv) {
@@ -257,6 +421,25 @@ export async function run(argv) {
       break;
     case 'scan':
       await cmdScan(parsed.positionals, parsed.values);
+      break;
+    case 'install':
+      cmdInstall(parsed.positionals);
+      break;
+    case 'uninstall':
+      cmdUninstall(parsed.positionals);
+      break;
+    case 'start':
+      cmdStart(parsed.positionals);
+      break;
+    case 'stop':
+      cmdStop(parsed.positionals);
+      break;
+    case 'restart':
+    case 'reinstall':
+      cmdRestart(parsed.positionals);
+      break;
+    case 'logs':
+      cmdLogs(parsed.positionals, parsed.values);
       break;
     default:
       console.error(`Unknown command: ${command}\nRun "pilot-manager help" for usage.`);
