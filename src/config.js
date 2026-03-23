@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import yaml from 'js-yaml';
 import { CONFIG_FILE, ENV_DIR, ensureConfigDir } from './paths.js';
 
@@ -60,6 +61,12 @@ export function resolveEnvVars(projectName, projectConfig, globalConfig) {
   }
 
   // 4. Set fixed vars
+  // launchd provides a minimal PATH — inherit the user's PATH so the daemon
+  // can find `claude`, `node`, `git`, and other tools it spawns.
+  if (!env.PATH) {
+    env.PATH = process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+  }
+  env.HOME = os.homedir();
   env.CLAUDE_DAEMON_PORT = String(projectConfig.port);
   env.CLAUDE_WORKING_DIR = projectConfig.path;
   env.CLAUDE_DAEMON_ID = projectConfig.pilot_id;
