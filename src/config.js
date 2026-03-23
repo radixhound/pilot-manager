@@ -62,6 +62,7 @@ export function resolveEnvVars(projectName, projectConfig, globalConfig) {
   // 4. Set fixed vars
   env.CLAUDE_DAEMON_PORT = String(projectConfig.port);
   env.CLAUDE_WORKING_DIR = projectConfig.path;
+  env.CLAUDE_DAEMON_ID = projectConfig.pilot_id;
   if (projectConfig.auth_token) {
     env.CLAUDE_AUTH_TOKEN = projectConfig.auth_token;
   }
