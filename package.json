@@ -1,0 +1,27 @@
+{
+  "name": "@radnine/claude-pilot-manager",
+  "version": "0.1.0",
+  "description": "Per-machine supervisor for @radnine/claude-session-daemon instances",
+  "type": "module",
+  "bin": {
+    "pilot-manager": "bin/pilot-manager"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/radixhound/pilot-manager.git"
+  }
+}
