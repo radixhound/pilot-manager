@@ -12,7 +12,7 @@ function getPackageVersion() {
   }
 }
 
-export async function registerPilot(serverUrl, projectName, projectConfig) {
+export async function registerPilot(serverUrl, projectName, projectConfig, options = {}) {
   const globalConfig = loadConfig();
   const version = getPackageVersion();
   const maxSessions = globalConfig.max_sessions_per_project || 10;
@@ -44,6 +44,7 @@ export async function registerPilot(serverUrl, projectName, projectConfig) {
         'session_recover',
       ],
     },
+    force: options.force || false,
   };
 
   let response;
@@ -121,7 +122,17 @@ export async function registerProject(name, options = {}) {
   const globalConfig = loadConfig();
   const serverUrl = options.server || globalConfig.server_url;
 
-  const result = await registerPilot(serverUrl, name, project);
+  // If force re-registering, revoke the old token first (ignore failures —
+  // the token may already be invalid, which is fine)
+  if (options.force && project.auth_token) {
+    try {
+      await revokeToken(serverUrl, project.auth_token);
+    } catch {
+      // Token may already be invalid or server may have purged it — proceed
+    }
+  }
+
+  const result = await registerPilot(serverUrl, name, project, options);
 
   // Save token to registry
   const data = loadProjects();

@@ -46,11 +46,11 @@ pilot-manager setup ~/projects --server http://localhost:3000 --yes
 
 | Command | Description |
 |---------|-------------|
-| `install [name]` | Generate plist + start via launchd |
-| `uninstall [name]` | Stop + remove plist |
-| `start [name]` | Start service |
-| `stop [name]` | Stop service |
-| `restart [name]` | Stop + regenerate plist + start |
+| `install [name]` | Generate plist + start via launchd (all if no name) |
+| `uninstall [name]` | Stop + remove plist (all if no name) |
+| `start [name]` | Start service (all if no name) |
+| `stop [name]` | Stop service (all if no name) |
+| `restart [name]` | Stop + regenerate plist + start (all if no name) |
 | `reinstall [name]` | Alias for restart (picks up config changes) |
 | `logs <name> [--stdout]` | Tail daemon logs |
 
@@ -58,7 +58,7 @@ pilot-manager setup ~/projects --server http://localhost:3000 --yes
 
 | Command | Description |
 |---------|-------------|
-| `register [name] [--server URL] [--force]` | Register with Rails server |
+| `register [name] [--server URL] [--force]` | Register with Rails server (all if no name) |
 | `deregister [name]` | Revoke token and clear from config |
 | `token <name> [--reveal]` | Show auth token |
 | `setup <dir> [--server URL] [--yes]` | Scan + register + install in one step |
@@ -102,6 +102,23 @@ projects:
     extra_env:
       CUSTOM_VAR: value
 ```
+
+## Re-registering Daemons
+
+If the server is reset or tokens become invalid, daemons will fail to connect and launchd will restart them in a loop. To recover:
+
+```bash
+# 1. Stop all daemons (breaks the restart loop)
+pilot-manager stop
+
+# 2. Force re-register all projects (revokes old tokens, gets new ones)
+pilot-manager register --force
+
+# 3. Reinstall all services (regenerates plists with new tokens + starts)
+pilot-manager reinstall
+```
+
+The `--force` flag suspends the existing pilot registration on the server and creates a fresh one with a new auth token.
 
 ## How It Works
 
