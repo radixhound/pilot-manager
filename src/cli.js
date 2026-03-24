@@ -16,6 +16,9 @@ import {
   registerProject, deregisterProject, registerAll,
   checkTokenStatus,
 } from './registrar.js';
+import {
+  getInstalledDaemonVersion, getLatestDaemonVersion, upgradeDaemon,
+} from './upgrade.js';
 
 const HELP = `
 pilot-manager — Per-machine supervisor for claude-session-daemon instances
@@ -45,6 +48,7 @@ Registration Commands:
   setup <dir> [--server URL] [--yes]  Scan + register + install in one step
 
 Other:
+  upgrade [--version X]          Upgrade daemon to latest (or specified) version
   version                        Show version
   help                           Show this help
 
@@ -462,6 +466,52 @@ async function cmdSetup(positionals, args) {
   cmdInstall([]);
 }
 
+function cmdUpgrade(args) {
+  const currentVersion = getInstalledDaemonVersion();
+  if (!currentVersion) {
+    console.error('Error: daemon not found. Install it first with: npm install -g @radnine/claude-session-daemon');
+    process.exit(1);
+  }
+
+  const targetVersion = args.version || null;
+  const latest = getLatestDaemonVersion();
+
+  if (!targetVersion && currentVersion === latest) {
+    console.log(`Daemon is already at the latest version (${currentVersion}).`);
+    return;
+  }
+
+  if (targetVersion && currentVersion === targetVersion) {
+    console.log(`Daemon is already at version ${currentVersion}.`);
+    return;
+  }
+
+  const target = targetVersion || latest;
+  console.log(`Upgrading daemon: ${currentVersion} → ${target}`);
+
+  const newVersion = upgradeDaemon(targetVersion);
+  console.log(`Installed daemon version ${newVersion}`);
+
+  // Reinstall all running services to pick up the new binary
+  const projects = listProjects();
+  const installed = projects.filter(p => getServiceStatus(p.name) !== 'not installed');
+
+  if (installed.length > 0) {
+    console.log(`\nRestarting ${installed.length} service(s)...`);
+    for (const p of installed) {
+      try {
+        restartService(p.name);
+        const pid = getServicePid(p.name);
+        console.log(`  Restarted "${p.name}"${pid ? ` (PID ${pid})` : ''}`);
+      } catch (err) {
+        console.error(`  Failed "${p.name}": ${err.message}`);
+      }
+    }
+  } else {
+    console.log('\nNo installed services to restart.');
+  }
+}
+
 function cmdVersion() {
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   console.log(`pilot-manager: @radnine/claude-pilot-manager@${pkg.version}`);
@@ -518,6 +568,7 @@ export async function run(argv) {
         help: { type: 'boolean', short: 'h', default: false },
         stdout: { type: 'boolean', default: false },
         lines: { type: 'string' },
+        version: { type: 'string' },
       },
       allowPositionals: true,
       strict: false,
@@ -578,6 +629,9 @@ export async function run(argv) {
       break;
     case 'setup':
       await cmdSetup(parsed.positionals, parsed.values);
+      break;
+    case 'upgrade':
+      cmdUpgrade(parsed.values);
       break;
     default:
       console.error(`Unknown command: ${command}\nRun "pilot-manager help" for usage.`);
