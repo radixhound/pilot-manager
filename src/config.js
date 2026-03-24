@@ -63,8 +63,13 @@ export function resolveEnvVars(projectName, projectConfig, globalConfig) {
   // 4. Set fixed vars
   // launchd provides a minimal PATH — inherit the user's PATH so the daemon
   // can find `claude`, `node`, `git`, and other tools it spawns.
+  // Always include ~/.local/bin (Claude CLI default install location).
   if (!env.PATH) {
     env.PATH = process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+  }
+  const localBin = path.join(os.homedir(), '.local', 'bin');
+  if (!env.PATH.split(':').includes(localBin)) {
+    env.PATH = `${localBin}:${env.PATH}`;
   }
   env.HOME = os.homedir();
   env.CLAUDE_DAEMON_PORT = String(projectConfig.port);
