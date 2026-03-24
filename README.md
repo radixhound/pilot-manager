@@ -63,6 +63,13 @@ pilot-manager setup ~/projects --server http://localhost:3000 --yes
 | `token <name> [--reveal]` | Show auth token |
 | `setup <dir> [--server URL] [--yes]` | Scan + register + install in one step |
 
+### Other
+
+| Command | Description |
+|---------|-------------|
+| `upgrade [--version X]` | Upgrade daemon to latest (or specified) npm version and restart services |
+| `version` | Show versions (manager, daemon, node) |
+
 ## Configuration
 
 All config lives in `~/.config/claude-pilot-manager/`:
