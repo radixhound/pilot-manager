@@ -34,12 +34,12 @@ Service Commands:
   uninstall [name]               Stop + remove plist (all or one)
   start [name]                   Start service via launchctl load
   stop [name]                    Stop service via launchctl unload
-  restart [name]                 Stop + regenerate plist + start
+  restart [name]                 Stop + regenerate plist + start (all if no name)
   reinstall [name]               Alias for restart (picks up config changes)
   logs <name> [--stdout]         Tail a daemon's log
 
 Registration Commands:
-  register [name] [--server URL] [--force]  Register with Rails server
+  register [name] [--server URL] [--force]  Register with Rails server (all if no name)
   deregister [name]              Revoke token and clear from config
   token <name> [--reveal]        Show auth token for a project
   setup <dir> [--server URL] [--yes]  Scan + register + install in one step
