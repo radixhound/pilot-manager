@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import yaml from 'js-yaml';
 import { PROJECTS_FILE, ensureConfigDir } from './paths.js';
 import { loadConfig } from './config.js';
@@ -66,7 +67,7 @@ export function addProject(name, projectPath, options = {}) {
   data.projects[name] = {
     path: projectPath,
     port,
-    pilot_id: `${name}-pilot`,
+    pilot_id: `${name}-pilot-${os.hostname()}`,
     auth_token: null,
     auto_restart: true,
     extra_env: {},
