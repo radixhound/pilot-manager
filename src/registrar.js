@@ -1,5 +1,6 @@
 import os from 'node:os';
 import fs from 'node:fs';
+import { execSync } from 'node:child_process';
 import { loadConfig } from './config.js';
 import { getProject, loadProjects, saveProjects, listProjects } from './registry.js';
 
@@ -9,6 +10,22 @@ function getPackageVersion() {
     return pkg.version;
   } catch {
     return '0.1.0';
+  }
+}
+
+// The server find-or-creates a Repo row from the pilot's git remote (canonical
+// "org/name" → slug) so it shows up in the repo scope switcher. Report the
+// project's origin URL; '' when there's no origin (or it isn't a git repo), in
+// which case the server falls back to basename matching against known repos.
+export function gitRemoteFor(projectPath) {
+  try {
+    return execSync('git remote get-url origin', {
+      cwd: projectPath,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return '';
   }
 }
 
@@ -25,6 +42,7 @@ export async function registerPilot(serverUrl, projectName, projectConfig, optio
       port: projectConfig.port,
       version,
       working_directory: projectConfig.path,
+      git_remote: gitRemoteFor(projectConfig.path),
       max_sessions: maxSessions,
       security_level: 'standard',
       access_scope: 'global',
