@@ -71,6 +71,37 @@ describe('Plist Generation', () => {
     assert.ok(fs.existsSync(nodeBin));
   });
 
+  it('falls back to process.execPath when no stable symlink matches', () => {
+    assert.equal(resolveNodeBinary(['/no/such/node/binary']), process.execPath);
+  });
+
+  it('prefers a stable symlink that resolves to the same node binary', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pm-node-link-'));
+    const link = path.join(dir, 'node');
+    fs.symlinkSync(process.execPath, link);
+    try {
+      const result = resolveNodeBinary([link]);
+      assert.equal(result, link);
+      // The stable path must still resolve to the running node binary.
+      assert.equal(fs.realpathSync(result), fs.realpathSync(process.execPath));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores a stable symlink that points at a different binary', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pm-node-link-'));
+    const other = path.join(dir, 'other');
+    fs.writeFileSync(other, '#!/bin/sh\n');
+    const link = path.join(dir, 'node');
+    fs.symlinkSync(other, link);
+    try {
+      assert.equal(resolveNodeBinary([link]), process.execPath);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('sanitizes project names in labels', () => {
     const pp = plistPath('My Project With Spaces!');
     assert.ok(pp.includes('com.radnine.pilot.my-project-with-spaces-'));
