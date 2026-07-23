@@ -9,7 +9,7 @@ import { ensureConfigDir, LOGS_DIR } from './paths.js';
 import {
   installService, uninstallService, restartService,
   installAll, uninstallAll,
-  getServiceStatus, getServicePid,
+  getServiceStatus, getServicePid, planServiceRefresh,
   logPath, plistPath, resolveDaemonEntry,
 } from './launchd.js';
 import {
@@ -45,7 +45,8 @@ Registration Commands:
   register [name] [--server URL] [--force]  Register with Rails server (all if no name)
   deregister [name]              Revoke token and clear from config
   token <name> [--reveal]        Show auth token for a project
-  setup <dir> [--server URL] [--yes]  Scan + register + install in one step
+  setup <path> --name X [--port N] [--server URL]  Add + register + install one project
+  setup <parent-dir> [--server URL] [--yes]        Scan + register + install all found
 
 Other:
   upgrade [--version X]          Upgrade daemon to latest (or specified) version
@@ -353,6 +354,33 @@ function cmdLogs(positionals, args) {
   }
 }
 
+// After a registration saves a fresh token, an already-installed launchd service
+// still holds the OLD token in its plist's EnvironmentVariables, so the running
+// daemon keeps authenticating with a revoked credential. Bring it back in sync:
+// regenerate the plist and reload. No-op (with a note) when nothing is installed
+// yet — the token gets baked in at first install. Never throws: a refresh failure
+// after a successful registration must NOT read as a registration failure, so it's
+// reported with a `reinstall` retry pointer and returned to the caller to decide.
+function refreshServiceIfInstalled(name) {
+  const plan = planServiceRefresh(getServiceStatus(name));
+
+  if (plan.action === 'skip') {
+    console.log(`  No launchd service installed for "${name}" yet — token applies at install.`);
+    return { installed: false, refreshed: false };
+  }
+
+  try {
+    restartService(name);
+    const pid = getServicePid(name);
+    console.log(`  Reinstalled service "${name}"${pid ? ` (PID ${pid})` : ''} to apply the new token.`);
+    return { installed: true, refreshed: true, pid };
+  } catch (err) {
+    console.error(`  Token saved, but reloading the service failed: ${err.message}`);
+    console.error(`  Retry: pilot-manager reinstall ${name}`);
+    return { installed: true, refreshed: false, error: err.message };
+  }
+}
+
 async function cmdRegister(positionals, args) {
   const options = {};
   if (args.server) options.server = args.server;
@@ -368,6 +396,7 @@ async function cmdRegister(positionals, args) {
       }
       const result = await registerProject(name, options);
       console.log(`Registered "${name}" — token: ${result.auth_token?.slice(0, 8)}...`);
+      refreshServiceIfInstalled(name);
     } catch (err) {
       console.error(`Error: ${err.message}`);
       process.exit(1);
@@ -377,6 +406,7 @@ async function cmdRegister(positionals, args) {
     for (const r of results) {
       if (r.success) {
         console.log(`Registered "${r.name}" — token: ${r.auth_token?.slice(0, 8)}...`);
+        refreshServiceIfInstalled(r.name);
       } else if (r.skipped) {
         console.log(`Skipped "${r.name}" (${r.error})`);
       } else {
@@ -429,14 +459,95 @@ function cmdToken(positionals, args) {
   }
 }
 
-async function cmdSetup(positionals, args) {
-  const parentDir = positionals[0];
-  if (!parentDir) {
-    console.error('Error: parent directory is required. Usage: pilot-manager setup <dir> [--server URL] [--yes]');
+// Run add → register → install for a single named project, stopping at the
+// first stage that fails and pointing at the staged command to retry.
+async function setupSingleProject(projectPath, name, args) {
+  const absPath = path.resolve(projectPath);
+  if (!fs.existsSync(absPath) || !fs.statSync(absPath).isDirectory()) {
+    console.error(`Error: "${absPath}" is not a valid directory`);
     process.exit(1);
   }
 
-  // Step 1: Init if needed
+  // Stage 1: add to registry (idempotent — reuse an existing entry)
+  console.log('--- Adding to registry ---');
+  const existing = getProject(name);
+  if (existing) {
+    if (path.resolve(existing.path) !== absPath) {
+      console.error(
+        `Error: "${name}" already exists in registry pointing at ${existing.path}.\n` +
+        `  Use a different --name, or remove it first: pilot-manager remove ${name}`
+      );
+      process.exit(1);
+    }
+    console.log(`"${name}" already in registry (port ${existing.port}) — reusing.`);
+  } else {
+    try {
+      const options = {};
+      if (args.port) options.port = parseInt(args.port, 10);
+      const project = addProject(name, absPath, options);
+      console.log(`Added "${name}" (port ${project.port}) → ${absPath}`);
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  }
+
+  // Stage 2: register with server
+  console.log('\n--- Registering with server ---');
+  const project = getProject(name);
+  if (project?.auth_token && !args.force) {
+    console.log(`"${name}" already registered — reusing token. Use --force to re-register.`);
+  } else {
+    try {
+      const options = {};
+      if (args.server) options.server = args.server;
+      if (args.force) options.force = true;
+      const result = await registerProject(name, options);
+      console.log(`Registered "${name}" — token: ${result.auth_token?.slice(0, 8)}...`);
+    } catch (err) {
+      console.error(`Added OK, register failed: ${err.message}`);
+      console.error(`  Fix the issue, then retry: pilot-manager register ${name}`);
+      process.exit(1);
+    }
+  }
+
+  // Stage 3: install + load launchd service (bakes the token into the plist).
+  // If a service is already installed, regenerate the plist and reload so a
+  // freshly-saved token takes effect — a plain `launchctl load` would fail
+  // ("already loaded") and silently skip the reload.
+  console.log('\n--- Installing launchd service ---');
+  const alreadyInstalled = getServiceStatus(name) !== 'not installed';
+  if (alreadyInstalled) {
+    // Same rule as `register`: refresh the installed service so the freshly-saved
+    // token takes effect (a plain `launchctl load` would fail "already loaded").
+    const refresh = refreshServiceIfInstalled(name);
+    if (refresh.error) process.exit(1);
+  } else {
+    try {
+      installService(name);
+      const pid = getServicePid(name);
+      console.log(`Installed "${name}"${pid ? ` (PID ${pid})` : ''}`);
+    } catch (err) {
+      console.error(`Registered OK, install failed: ${err.message}`);
+      console.error(`  Fix the issue, then retry: pilot-manager install ${name}`);
+      process.exit(1);
+    }
+  }
+
+  const finalPid = getServicePid(name);
+  console.log(`\nReady: "${name}"${finalPid ? ` (PID ${finalPid})` : ''}`);
+}
+
+async function cmdSetup(positionals, args) {
+  const target = positionals[0];
+  if (!target) {
+    console.error('Error: a path is required. Usage:\n' +
+      '  pilot-manager setup <path> --name X   (one project)\n' +
+      '  pilot-manager setup <parent-dir>      (scan all subdirs)');
+    process.exit(1);
+  }
+
+  // Init server config if provided (shared by both modes)
   const config = loadConfig();
   if (args.server) {
     config.server_url = args.server;
@@ -444,7 +555,13 @@ async function cmdSetup(positionals, args) {
   }
   ensureConfigDir();
 
-  // Step 2: Scan
+  // Single-project mode: --name signals "this path IS the project"
+  if (args.name) {
+    await setupSingleProject(target, args.name, args);
+    return;
+  }
+
+  // Bulk mode: scan the parent dir for projects (existing behavior)
   console.log('--- Scanning for projects ---');
   await cmdScan(positionals, { ...args, yes: args.yes });
 
