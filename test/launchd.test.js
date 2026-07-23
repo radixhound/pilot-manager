@@ -12,7 +12,7 @@ fs.mkdirSync(path.join(TEST_DIR, '.config', 'claude-pilot-manager', 'env'), { re
 fs.mkdirSync(path.join(TEST_DIR, '.config', 'claude-pilot-manager', 'logs'), { recursive: true });
 fs.mkdirSync(path.join(TEST_DIR, 'Library', 'LaunchAgents'), { recursive: true });
 
-const { generatePlist, plistPath, resolveNodeBinary } = await import('../src/launchd.js');
+const { generatePlist, plistPath, resolveNodeBinary, planServiceRefresh } = await import('../src/launchd.js');
 const { saveConfig } = await import('../src/config.js');
 const { addProject } = await import('../src/registry.js');
 
@@ -96,6 +96,26 @@ describe('Plist Generation', () => {
     }
 
     assert.ok(plist.includes('<false/>'));
+  });
+});
+
+describe('planServiceRefresh (token-changed decision)', () => {
+  it('skips refresh when no service is installed', () => {
+    const plan = planServiceRefresh('not installed');
+    assert.equal(plan.action, 'skip');
+    assert.equal(plan.installed, false);
+  });
+
+  it('reinstalls when the service is installed but not running', () => {
+    const plan = planServiceRefresh('installed');
+    assert.equal(plan.action, 'reinstall');
+    assert.equal(plan.installed, true);
+  });
+
+  it('reinstalls when the service is currently running', () => {
+    const plan = planServiceRefresh('running');
+    assert.equal(plan.action, 'reinstall');
+    assert.equal(plan.installed, true);
   });
 });
 

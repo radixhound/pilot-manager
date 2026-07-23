@@ -203,6 +203,19 @@ export function getServiceStatus(name) {
   return 'not installed';
 }
 
+// Decide what to do with a launchd service after its registration token changed,
+// given the service's current status. Pure (no launchctl, no fs) so the branch
+// logic is unit-testable in isolation:
+//   'not installed' → skip: nothing to reload; the token bakes in at first install.
+//   'installed' / 'running' → reinstall: regenerate the plist and reload so the
+//                             running daemon picks up the new token.
+export function planServiceRefresh(status) {
+  if (status === 'not installed') {
+    return { action: 'skip', installed: false };
+  }
+  return { action: 'reinstall', installed: true };
+}
+
 export function installService(name) {
   const project = getProject(name);
   if (!project) throw new Error(`Project "${name}" not found in registry`);

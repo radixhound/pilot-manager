@@ -9,7 +9,7 @@ import { ensureConfigDir, LOGS_DIR } from './paths.js';
 import {
   installService, uninstallService, restartService,
   installAll, uninstallAll,
-  getServiceStatus, getServicePid,
+  getServiceStatus, getServicePid, planServiceRefresh,
   logPath, plistPath, resolveDaemonEntry,
 } from './launchd.js';
 import {
@@ -354,6 +354,33 @@ function cmdLogs(positionals, args) {
   }
 }
 
+// After a registration saves a fresh token, an already-installed launchd service
+// still holds the OLD token in its plist's EnvironmentVariables, so the running
+// daemon keeps authenticating with a revoked credential. Bring it back in sync:
+// regenerate the plist and reload. No-op (with a note) when nothing is installed
+// yet — the token gets baked in at first install. Never throws: a refresh failure
+// after a successful registration must NOT read as a registration failure, so it's
+// reported with a `reinstall` retry pointer and returned to the caller to decide.
+function refreshServiceIfInstalled(name) {
+  const plan = planServiceRefresh(getServiceStatus(name));
+
+  if (plan.action === 'skip') {
+    console.log(`  No launchd service installed for "${name}" yet — token applies at install.`);
+    return { installed: false, refreshed: false };
+  }
+
+  try {
+    restartService(name);
+    const pid = getServicePid(name);
+    console.log(`  Reinstalled service "${name}"${pid ? ` (PID ${pid})` : ''} to apply the new token.`);
+    return { installed: true, refreshed: true, pid };
+  } catch (err) {
+    console.error(`  Token saved, but reloading the service failed: ${err.message}`);
+    console.error(`  Retry: pilot-manager reinstall ${name}`);
+    return { installed: true, refreshed: false, error: err.message };
+  }
+}
+
 async function cmdRegister(positionals, args) {
   const options = {};
   if (args.server) options.server = args.server;
@@ -369,6 +396,7 @@ async function cmdRegister(positionals, args) {
       }
       const result = await registerProject(name, options);
       console.log(`Registered "${name}" — token: ${result.auth_token?.slice(0, 8)}...`);
+      refreshServiceIfInstalled(name);
     } catch (err) {
       console.error(`Error: ${err.message}`);
       process.exit(1);
@@ -378,6 +406,7 @@ async function cmdRegister(positionals, args) {
     for (const r of results) {
       if (r.success) {
         console.log(`Registered "${r.name}" — token: ${r.auth_token?.slice(0, 8)}...`);
+        refreshServiceIfInstalled(r.name);
       } else if (r.skipped) {
         console.log(`Skipped "${r.name}" (${r.error})`);
       } else {
@@ -488,20 +517,21 @@ async function setupSingleProject(projectPath, name, args) {
   // ("already loaded") and silently skip the reload.
   console.log('\n--- Installing launchd service ---');
   const alreadyInstalled = getServiceStatus(name) !== 'not installed';
-  try {
-    if (alreadyInstalled) {
-      restartService(name);
-      const pid = getServicePid(name);
-      console.log(`Reinstalled "${name}"${pid ? ` (PID ${pid})` : ''}`);
-    } else {
+  if (alreadyInstalled) {
+    // Same rule as `register`: refresh the installed service so the freshly-saved
+    // token takes effect (a plain `launchctl load` would fail "already loaded").
+    const refresh = refreshServiceIfInstalled(name);
+    if (refresh.error) process.exit(1);
+  } else {
+    try {
       installService(name);
       const pid = getServicePid(name);
       console.log(`Installed "${name}"${pid ? ` (PID ${pid})` : ''}`);
+    } catch (err) {
+      console.error(`Registered OK, install failed: ${err.message}`);
+      console.error(`  Fix the issue, then retry: pilot-manager install ${name}`);
+      process.exit(1);
     }
-  } catch (err) {
-    console.error(`Registered OK, install failed: ${err.message}`);
-    console.error(`  Fix the issue, then retry: pilot-manager install ${name}`);
-    process.exit(1);
   }
 
   const finalPid = getServicePid(name);
