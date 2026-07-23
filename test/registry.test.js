@@ -61,7 +61,8 @@ describe('Registry', () => {
 
     const result = addProject('my-project', tmpProject);
     assert.equal(result.port, 3601);
-    assert.equal(result.pilot_id, 'my-project-pilot');
+    // pilot_id is machine-scoped (PR #6) to avoid cross-host collisions
+    assert.equal(result.pilot_id, `my-project-pilot-${os.hostname()}`);
     assert.equal(result.auth_token, null);
 
     const projects = listProjects();
