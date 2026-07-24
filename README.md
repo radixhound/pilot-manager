@@ -63,6 +63,16 @@ pilot-manager setup ~/projects --server http://localhost:3000 --yes
 | `token <name> [--reveal]` | Show auth token |
 | `setup <dir> [--server URL] [--yes]` | Scan + register + install in one step |
 
+> An explicit `--server URL` on `register`, `setup`, or `seed` is persisted to
+> `config.yml` (`server_url`), so a later `install` bakes the right server into
+> the daemon's plist instead of the localhost default.
+
+### Seed
+
+| Command | Description |
+|---------|-------------|
+| `seed <target-root> [--server URL]` | Download + install the Command Center seed vault |
+
 ### Other
 
 | Command | Description |
@@ -109,6 +119,27 @@ projects:
     extra_env:
       CUSTOM_VAR: value
 ```
+
+## Seeding a Command Center vault
+
+`seed` downloads the packaged "Command Center" vault that the FlightDeck server
+ships and installs it onto this machine:
+
+```bash
+pilot-manager seed ~/projects/radnine --server http://localhost:3000
+# → ~/projects/radnine/command-center/
+```
+
+It fetches `<server>/seed/command-center.tar.gz`, extracts and verifies it in a
+staging area, then moves it into `<target-root>/command-center`. The delivery is
+**refuse-don't-clobber** (it aborts if `<target-root>/command-center` already
+exists) and **atomic** (a corrupt download or an invalid vault leaves the target
+untouched — nothing is half-written). On success it prints the personas found
+and the suggested follow-up: `pilot-manager add <target-root>/command-center`.
+
+Extraction shells out to `tar`, so `seed` is macOS-only like the rest of
+pilot-manager. If the server returns 404, it hasn't packaged a seed yet (or is
+too old to ship one).
 
 ## Re-registering Daemons
 

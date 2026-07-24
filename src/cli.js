@@ -3,7 +3,8 @@ import path from 'node:path';
 import fs from 'node:fs';
 import readline from 'node:readline';
 import { execSync } from 'node:child_process';
-import { loadConfig, saveConfig } from './config.js';
+import { loadConfig, saveConfig, persistServerUrl } from './config.js';
+import { seedCommandCenter } from './seed.js';
 import { addProject, removeProject, listProjects, getProject } from './registry.js';
 import { ensureConfigDir, LOGS_DIR } from './paths.js';
 import {
@@ -47,6 +48,9 @@ Registration Commands:
   token <name> [--reveal]        Show auth token for a project
   setup <path> --name X [--port N] [--server URL]  Add + register + install one project
   setup <parent-dir> [--server URL] [--yes]        Scan + register + install all found
+
+Seed:
+  seed <target-root> [--server URL]  Download + install the Command Center seed vault
 
 Other:
   upgrade [--version X]          Upgrade daemon to latest (or specified) version
@@ -383,7 +387,15 @@ function refreshServiceIfInstalled(name) {
 
 async function cmdRegister(positionals, args) {
   const options = {};
-  if (args.server) options.server = args.server;
+  if (args.server) {
+    options.server = args.server;
+    // Persist the explicit server so a later `install` bakes it into the
+    // daemon's plist — otherwise the URL was used for this call only and the
+    // installed service kept pointing at the config default.
+    if (persistServerUrl(args.server)) {
+      console.log(`server_url saved to config (${args.server}).`);
+    }
+  }
   if (args.force) options.force = true;
 
   if (positionals.length > 0) {
@@ -583,6 +595,33 @@ async function cmdSetup(positionals, args) {
   cmdInstall([]);
 }
 
+async function cmdSeed(positionals, args) {
+  const targetRoot = positionals[0];
+  if (!targetRoot) {
+    console.error('Error: a target root is required. Usage: pilot-manager seed <target-root> [--server URL]');
+    process.exit(1);
+  }
+
+  // Same server precedence as register: --server flag, else config default.
+  const config = loadConfig();
+  const serverUrl = args.server || config.server_url;
+
+  try {
+    const { dest, personas } = await seedCommandCenter(targetRoot, serverUrl);
+    // Persist the server only after a successful delivery. seed is atomic —
+    // a bad target, unreachable server, or 404 must not mutate config.
+    if (args.server && persistServerUrl(args.server)) {
+      console.log(`server_url saved to config (${args.server}).`);
+    }
+    console.log(`\nSeeded Command Center vault → ${dest}`);
+    console.log(`Personas: ${personas.join(', ')}`);
+    console.log(`\nNext: pilot-manager add ${dest}`);
+  } catch (err) {
+    console.error(`Error: ${err.message}`);
+    process.exit(1);
+  }
+}
+
 function cmdUpgrade(args) {
   const currentVersion = getInstalledDaemonVersion();
   if (!currentVersion) {
@@ -746,6 +785,9 @@ export async function run(argv) {
       break;
     case 'setup':
       await cmdSetup(parsed.positionals, parsed.values);
+      break;
+    case 'seed':
+      await cmdSeed(parsed.positionals, parsed.values);
       break;
     case 'upgrade':
       cmdUpgrade(parsed.values);
