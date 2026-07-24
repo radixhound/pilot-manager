@@ -28,6 +28,19 @@ export function saveConfig(config) {
   fs.renameSync(tmp, CONFIG_FILE);
 }
 
+// Persist an explicitly-chosen server URL so a later `install` bakes the right
+// CLAUDE_RAILS_URL into the daemon's plist. Without this, `register --server X`
+// used X only for the one API call while config kept the default localhost, so
+// the installed daemon pointed at the wrong server. Returns true if the file
+// changed (nothing to write when the URL already matches).
+export function persistServerUrl(url) {
+  const config = loadConfig();
+  if (config.server_url === url) return false;
+  config.server_url = url;
+  saveConfig(config);
+  return true;
+}
+
 function parseEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return {};
   const lines = fs.readFileSync(filePath, 'utf8').split('\n');
