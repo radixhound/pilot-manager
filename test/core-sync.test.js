@@ -266,7 +266,7 @@ describe('syncManagedCore', () => {
 
     assert.equal(interrupted.outcome, 'BLOCKED');
     assert.equal(fs.existsSync(managedCoreStatePath(vault, SERVER)), false);
-    assert.equal(fs.existsSync(path.join(vault, incoming.entries[0].path)), true);
+    assert.equal(fs.lstatSync(path.join(vault, incoming.entries[0].path)).isSymbolicLink(), true);
 
     const retried = await syncManagedCore(vault, SERVER, {
       fetchImpl: async () => responseFor(incoming),
