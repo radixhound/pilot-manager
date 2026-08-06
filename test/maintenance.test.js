@@ -6,7 +6,15 @@ import path from 'node:path';
 
 const { maintainFlightDeck } = await import('../src/maintenance.js');
 
-function fakeGit(checkout, { dirty = false, detached = false, upstream = 'origin/main', counts = ['0\t0'] } = {}) {
+function fakeGit(checkout, {
+  dirty = false,
+  detached = false,
+  upstream = 'origin/main',
+  remote = 'origin',
+  topLevel = checkout,
+  counts = ['0\t0'],
+  failCommands = [],
+} = {}) {
   const calls = [];
   let countIndex = 0;
   return {
@@ -14,7 +22,8 @@ function fakeGit(checkout, { dirty = false, detached = false, upstream = 'origin
     run(args) {
       calls.push(args);
       const command = args.join(' ');
-      if (command === 'rev-parse --show-toplevel') return `${checkout}\n`;
+      if (failCommands.includes(command)) throw new Error(`failed: ${command}`);
+      if (command === 'rev-parse --show-toplevel') return `${topLevel}\n`;
       if (command === 'status --porcelain=v1 --untracked-files=normal') return dirty ? ' M app.rb\n' : '';
       if (command === 'symbolic-ref --quiet --short HEAD') {
         if (detached) throw new Error('detached');
@@ -24,8 +33,8 @@ function fakeGit(checkout, { dirty = false, detached = false, upstream = 'origin
         if (!upstream) throw new Error('no upstream');
         return `${upstream}\n`;
       }
-      if (command === 'config --get branch.main.remote') return 'origin\n';
-      if (command === 'fetch --quiet origin') return '';
+      if (command === 'config --get branch.main.remote') return `${remote}\n`;
+      if (command === `fetch --quiet ${remote}`) return '';
       if (command === 'rev-list --left-right --count HEAD...@{upstream}') {
         return `${counts[Math.min(countIndex++, counts.length - 1)]}\n`;
       }
@@ -118,6 +127,95 @@ describe('maintainFlightDeck', () => {
     });
     assert.equal(result.outcome, 'NEEDS_DECISION');
     assert.match(result.evidence.join(' '), /not configured/i);
+  });
+
+  it('refuses a configured path that is not the checkout root', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pm-maintain-root-'));
+    const checkout = path.join(root, 'nested');
+    fs.mkdirSync(checkout);
+    const git = fakeGit(checkout, { topLevel: root });
+    let syncCalled = false;
+    const deps = dependencies(checkout, git);
+    deps.syncCoreImpl = async () => { syncCalled = true; return { outcome: 'ALREADY_CURRENT', evidence: [] }; };
+
+    const result = await maintainFlightDeck(
+      'flight-deck', checkout, 'https://flightdeck.example.test', deps,
+    );
+
+    assert.equal(result.outcome, 'NEEDS_DECISION');
+    assert.match(result.evidence.join(' '), /checkout root/i);
+    assert.equal(syncCalled, false);
+    assert.equal(git.calls.some(args => args[0] === 'fetch'), false);
+  });
+
+  it('refuses an unsafe upstream remote before fetch or core sync', async () => {
+    const checkout = fs.mkdtempSync(path.join(os.tmpdir(), 'pm-maintain-checkout-'));
+    const git = fakeGit(checkout, { remote: '--upload-pack=unsafe' });
+    let syncCalled = false;
+    const deps = dependencies(checkout, git);
+    deps.syncCoreImpl = async () => { syncCalled = true; return { outcome: 'ALREADY_CURRENT', evidence: [] }; };
+
+    const result = await maintainFlightDeck(
+      'flight-deck', checkout, 'https://flightdeck.example.test', deps,
+    );
+
+    assert.equal(result.outcome, 'NEEDS_DECISION');
+    assert.match(result.evidence.join(' '), /remote identity/i);
+    assert.equal(syncCalled, false);
+    assert.equal(git.calls.some(args => args[0] === 'fetch'), false);
+  });
+
+  it('returns BLOCKED without core sync when upstream fetch fails', async () => {
+    const checkout = fs.mkdtempSync(path.join(os.tmpdir(), 'pm-maintain-checkout-'));
+    const git = fakeGit(checkout, { failCommands: ['fetch --quiet origin'] });
+    let syncCalled = false;
+    const deps = dependencies(checkout, git);
+    deps.syncCoreImpl = async () => { syncCalled = true; return { outcome: 'ALREADY_CURRENT', evidence: [] }; };
+
+    const result = await maintainFlightDeck(
+      'flight-deck', checkout, 'https://flightdeck.example.test', deps,
+    );
+
+    assert.equal(result.outcome, 'BLOCKED');
+    assert.match(result.evidence.join(' '), /fetch failed/i);
+    assert.equal(syncCalled, false);
+  });
+
+  it('returns BLOCKED without core sync when fast-forward fails', async () => {
+    const checkout = fs.mkdtempSync(path.join(os.tmpdir(), 'pm-maintain-checkout-'));
+    const git = fakeGit(checkout, {
+      counts: ['0\t1'],
+      failCommands: ['merge --ff-only @{upstream}'],
+    });
+    let syncCalled = false;
+    const deps = dependencies(checkout, git);
+    deps.syncCoreImpl = async () => { syncCalled = true; return { outcome: 'ALREADY_CURRENT', evidence: [] }; };
+
+    const result = await maintainFlightDeck(
+      'flight-deck', checkout, 'https://flightdeck.example.test', deps,
+    );
+
+    assert.equal(result.outcome, 'BLOCKED');
+    assert.match(result.evidence.join(' '), /fast-forwarded safely/i);
+    assert.equal(result.checkoutUpdated, false);
+    assert.equal(syncCalled, false);
+  });
+
+  it('returns BLOCKED without core sync when fast-forward postverification fails', async () => {
+    const checkout = fs.mkdtempSync(path.join(os.tmpdir(), 'pm-maintain-checkout-'));
+    const git = fakeGit(checkout, { counts: ['0\t1', '0\t1'] });
+    let syncCalled = false;
+    const deps = dependencies(checkout, git);
+    deps.syncCoreImpl = async () => { syncCalled = true; return { outcome: 'ALREADY_CURRENT', evidence: [] }; };
+
+    const result = await maintainFlightDeck(
+      'flight-deck', checkout, 'https://flightdeck.example.test', deps,
+    );
+
+    assert.equal(result.outcome, 'BLOCKED');
+    assert.match(result.evidence.join(' '), /did not leave a clean checkout/i);
+    assert.equal(result.checkoutUpdated, true);
+    assert.equal(syncCalled, false);
   });
 
   it('preserves a refusal from core sync, including evidence that a fast-forward already happened', async () => {

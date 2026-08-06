@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { TextDecoder } from 'node:util';
-import { MANAGED_CORE_STATE_DIR, ensureConfigDir } from './paths.js';
+import { CONFIG_DIR, MANAGED_CORE_STATE_DIR } from './paths.js';
 
 const MANIFEST_PATH = '/seed/core-crew/manifest.json';
 const STATE_SCHEMA_VERSION = 1;
@@ -195,6 +195,53 @@ function canonicalVaultPath(vaultPath) {
     throw new CoreSyncRefusal('BLOCKED', `Command Center path "${resolved}" is not a directory.`);
   }
   return fs.realpathSync(resolved);
+}
+
+const STATE_DIRECTORY_CHAIN = [
+  path.dirname(CONFIG_DIR),
+  CONFIG_DIR,
+  MANAGED_CORE_STATE_DIR,
+];
+
+function trustedStateDirectory({ create = false } = {}) {
+  let stateDirectoryStat;
+  for (const directory of STATE_DIRECTORY_CHAIN) {
+    let stat;
+    try {
+      stat = fs.lstatSync(directory);
+    } catch (error) {
+      if (error.code !== 'ENOENT' || !create) {
+        throw new CoreSyncRefusal('BLOCKED', 'Managed-core state directory cannot be trusted.');
+      }
+      try {
+        fs.mkdirSync(directory, { mode: 0o700 });
+        stat = fs.lstatSync(directory);
+      } catch {
+        throw new CoreSyncRefusal('BLOCKED', 'Managed-core state directory cannot be established safely.');
+      }
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new CoreSyncRefusal(
+        'BLOCKED',
+        'Managed-core state directory or one of its config ancestors is not a real directory.',
+      );
+    }
+    if (directory === MANAGED_CORE_STATE_DIR) stateDirectoryStat = stat;
+  }
+
+  try {
+    return {
+      realpath: fs.realpathSync(MANAGED_CORE_STATE_DIR),
+      device: stateDirectoryStat.dev,
+      inode: stateDirectoryStat.ino,
+    };
+  } catch {
+    throw new CoreSyncRefusal('BLOCKED', 'Managed-core state directory cannot be resolved safely.');
+  }
+}
+
+function sameTrustedStateDirectory(left, right) {
+  return left.realpath === right.realpath && left.device === right.device && left.inode === right.inode;
 }
 
 export function managedCoreStatePath(vaultPath, serverUrl) {
@@ -475,16 +522,12 @@ function verifyApplied(canonicalVault, manifest) {
   }
 }
 
-function saveState(statePath, state, previousState) {
+function saveState(statePath, state, previousState, trustedStateRoot) {
   const serialized = `${JSON.stringify(state, null, 2)}\n`;
-  if (previousState && JSON.stringify(previousState) === JSON.stringify(state)) return;
-
-  ensureConfigDir();
-  fs.mkdirSync(MANAGED_CORE_STATE_DIR, { recursive: true, mode: 0o700 });
-  const stateDirectoryStat = fs.lstatSync(MANAGED_CORE_STATE_DIR);
-  if (stateDirectoryStat.isSymbolicLink() || !stateDirectoryStat.isDirectory()) {
-    throw new CoreSyncRefusal('NEEDS_DECISION', 'Managed-core state directory is not a regular directory.');
+  if (!sameTrustedStateDirectory(trustedStateDirectory(), trustedStateRoot)) {
+    throw new CoreSyncRefusal('BLOCKED', 'Managed-core state directory identity changed during synchronization.');
   }
+  if (previousState && JSON.stringify(previousState) === JSON.stringify(state)) return;
   const temporary = `${statePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
   try {
     fs.writeFileSync(temporary, serialized, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
@@ -505,17 +548,24 @@ export async function syncManagedCore(vaultPath, serverUrl, options = {}) {
       server_identity: digestIdentity(serverIdentity),
     };
     const statePath = managedCoreStatePath(canonicalVault, serverIdentity);
+    const trustedStateRoot = trustedStateDirectory({ create: true });
     const state = loadState(statePath, identity);
     const { changes, snapshots } = preflight(canonicalVault, manifest, state);
 
     if (changes.length > 0) {
+      if (!sameTrustedStateDirectory(trustedStateDirectory(), trustedStateRoot)) {
+        throw new CoreSyncRefusal('BLOCKED', 'Managed-core state directory identity changed before staging.');
+      }
       stageDir = stageChanges(canonicalVault, changes);
+      if (!sameTrustedStateDirectory(trustedStateDirectory(), trustedStateRoot)) {
+        throw new CoreSyncRefusal('BLOCKED', 'Managed-core state directory identity changed before application.');
+      }
       applyChanges(canonicalVault, stageDir, changes, snapshots);
     }
     verifyApplied(canonicalVault, manifest);
 
     const nextState = stateFor(manifest, canonicalVault, serverIdentity);
-    saveState(statePath, nextState, state);
+    saveState(statePath, nextState, state, trustedStateRoot);
 
     if (changes.length > 0) {
       return {

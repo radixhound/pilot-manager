@@ -16,6 +16,7 @@ const {
   syncManagedCore,
   validateCoreManifest,
 } = await import('../src/core-sync.js');
+const { MANAGED_CORE_STATE_DIR } = await import('../src/paths.js');
 
 const SERVER = 'https://flightdeck.example.test';
 
@@ -243,6 +244,68 @@ describe('syncManagedCore', () => {
     );
   });
 
+  it('converges on retry after application stops between atomic path renames', async () => {
+    const incoming = manifest();
+    const realRename = fs.renameSync;
+    let vaultRenames = 0;
+    fs.renameSync = (source, destination) => {
+      if (source.includes(`${path.sep}.pilot-core-`) && ++vaultRenames === 2) {
+        throw new Error('simulated interruption');
+      }
+      return realRename(source, destination);
+    };
+
+    let interrupted;
+    try {
+      interrupted = await syncManagedCore(vault, SERVER, {
+        fetchImpl: async () => responseFor(incoming),
+      });
+    } finally {
+      fs.renameSync = realRename;
+    }
+
+    assert.equal(interrupted.outcome, 'BLOCKED');
+    assert.equal(fs.existsSync(managedCoreStatePath(vault, SERVER)), false);
+    assert.equal(fs.existsSync(path.join(vault, incoming.entries[0].path)), true);
+
+    const retried = await syncManagedCore(vault, SERVER, {
+      fetchImpl: async () => responseFor(incoming),
+    });
+    assert.equal(retried.outcome, 'UPDATED');
+    assert.ok(fs.existsSync(managedCoreStatePath(vault, SERVER)));
+  });
+
+  it('adopts the verified incoming set on retry when ownership-state rename failed', async () => {
+    const incoming = manifest();
+    const statePath = managedCoreStatePath(vault, SERVER);
+    const realRename = fs.renameSync;
+    fs.renameSync = (source, destination) => {
+      if (destination === statePath) throw new Error('simulated state-save failure');
+      return realRename(source, destination);
+    };
+
+    let interrupted;
+    try {
+      interrupted = await syncManagedCore(vault, SERVER, {
+        fetchImpl: async () => responseFor(incoming),
+      });
+    } finally {
+      fs.renameSync = realRename;
+    }
+
+    assert.equal(interrupted.outcome, 'BLOCKED');
+    assert.equal(fs.existsSync(statePath), false);
+    for (const entry of incoming.entries) {
+      assert.equal(fs.existsSync(path.join(vault, entry.path)), true);
+    }
+
+    const retried = await syncManagedCore(vault, SERVER, {
+      fetchImpl: async () => responseFor(incoming),
+    });
+    assert.equal(retried.outcome, 'ALREADY_CURRENT');
+    assert.ok(fs.existsSync(statePath));
+  });
+
   it('returns BLOCKED before writes when a managed destination was locally modified', async () => {
     const first = manifest('one');
     const second = manifest('two');
@@ -293,5 +356,36 @@ describe('syncManagedCore', () => {
       fetchImpl: async () => responseFor({ error: 'unavailable' }, { status: 500 }),
     });
     assert.equal(unavailable.outcome, 'BLOCKED');
+  });
+
+  it('refuses identity-valid ownership state behind a symlinked state directory before vault mutation', async () => {
+    const first = manifest('one');
+    const second = manifest('two');
+    await syncManagedCore(vault, SERVER, { fetchImpl: async () => responseFor(first) });
+
+    const managedPath = path.join(vault, 'agents', 'flight-engineer.md');
+    const statePath = managedCoreStatePath(vault, SERVER);
+    const validState = fs.readFileSync(statePath);
+    const attackDirectory = fs.mkdtempSync(path.join(TEST_HOME, 'managed-core-attack-'));
+    fs.writeFileSync(path.join(attackDirectory, path.basename(statePath)), validState);
+    fs.rmSync(MANAGED_CORE_STATE_DIR, { recursive: true });
+    fs.symlinkSync(attackDirectory, MANAGED_CORE_STATE_DIR);
+
+    try {
+      const result = await syncManagedCore(vault, SERVER, {
+        fetchImpl: async () => responseFor(second),
+      });
+
+      assert.equal(result.outcome, 'BLOCKED');
+      assert.match(result.evidence.join(' '), /state directory/i);
+      assert.equal(
+        fs.readFileSync(managedPath, 'utf8'),
+        first.entries.find(entry => entry.path === 'agents/flight-engineer.md').content,
+      );
+    } finally {
+      fs.unlinkSync(MANAGED_CORE_STATE_DIR);
+      fs.rmSync(attackDirectory, { recursive: true, force: true });
+      fs.mkdirSync(MANAGED_CORE_STATE_DIR, { recursive: true });
+    }
   });
 });
