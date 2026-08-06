@@ -131,6 +131,10 @@ describe('managed-core manifest validation', () => {
     badUnicode.entries[5].content = '\ud800';
     assert.throws(() => validateCoreManifest(badUnicode), /UTF-8/i);
 
+    const validPair = manifest();
+    validPair.entries[5].content = 'Flight Engineer \ud83d\ude80\n';
+    assert.doesNotThrow(() => validateCoreManifest(finalizeManifest(validPair.entries)));
+
     const escaping = manifest();
     const link = escaping.entries.find(entry => entry.kind === 'symlink');
     link.content = '../../../../outside.md';
