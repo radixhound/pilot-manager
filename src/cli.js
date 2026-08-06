@@ -5,6 +5,8 @@ import readline from 'node:readline';
 import { execSync } from 'node:child_process';
 import { loadConfig, saveConfig, persistServerUrl } from './config.js';
 import { seedCommandCenter } from './seed.js';
+import { syncManagedCore } from './core-sync.js';
+import { maintainFlightDeck } from './maintenance.js';
 import { addProject, removeProject, listProjects, getProject } from './registry.js';
 import { ensureConfigDir, LOGS_DIR } from './paths.js';
 import {
@@ -51,6 +53,10 @@ Registration Commands:
 
 Seed:
   seed <target-root> [--server URL]  Download + install the Command Center seed vault
+
+Managed FlightDeck:
+  sync-core <command-center-path> [--server URL]  Safely synchronize managed core crew
+  maintain <project-name> --command-center PATH [--server URL]  Fast-forward FlightDeck + sync core crew
 
 Other:
   upgrade [--version X]          Upgrade daemon to latest (or specified) version
@@ -622,6 +628,49 @@ async function cmdSeed(positionals, args) {
   }
 }
 
+function emitManagedOutcome(managedResult) {
+  const lines = [managedResult.outcome, ...(managedResult.evidence || []).map(line => `- ${line}`)];
+  const refusal = managedResult.outcome === 'BLOCKED' || managedResult.outcome === 'NEEDS_DECISION';
+  const writer = refusal ? console.error : console.log;
+  for (const line of lines) writer(line);
+  if (managedResult.outcome === 'BLOCKED') process.exit(2);
+  if (managedResult.outcome === 'NEEDS_DECISION') process.exit(3);
+}
+
+async function cmdSyncCore(positionals, args) {
+  const commandCenterPath = positionals[0];
+  if (!commandCenterPath) {
+    emitManagedOutcome({
+      outcome: 'NEEDS_DECISION',
+      evidence: ['Command Center path is required. Usage: pilot-manager sync-core <command-center-path> [--server URL]'],
+    });
+    return;
+  }
+
+  const config = loadConfig();
+  const serverUrl = args.server || config.server_url;
+  emitManagedOutcome(await syncManagedCore(commandCenterPath, serverUrl));
+}
+
+async function cmdMaintain(positionals, args) {
+  const projectName = positionals[0];
+  const commandCenterPath = args['command-center'];
+  if (!projectName || !commandCenterPath) {
+    emitManagedOutcome({
+      outcome: 'NEEDS_DECISION',
+      evidence: [
+        'Configured FlightDeck project name and Command Center path are required. ' +
+        'Usage: pilot-manager maintain <project-name> --command-center <path> [--server URL]',
+      ],
+    });
+    return;
+  }
+
+  const config = loadConfig();
+  const serverUrl = args.server || config.server_url;
+  emitManagedOutcome(await maintainFlightDeck(projectName, commandCenterPath, serverUrl));
+}
+
 function cmdUpgrade(args) {
   const currentVersion = getInstalledDaemonVersion();
   if (!currentVersion) {
@@ -725,6 +774,7 @@ export async function run(argv) {
         stdout: { type: 'boolean', default: false },
         lines: { type: 'string' },
         version: { type: 'string' },
+        'command-center': { type: 'string' },
       },
       allowPositionals: true,
       strict: false,
@@ -788,6 +838,12 @@ export async function run(argv) {
       break;
     case 'seed':
       await cmdSeed(parsed.positionals, parsed.values);
+      break;
+    case 'sync-core':
+      await cmdSyncCore(parsed.positionals, parsed.values);
+      break;
+    case 'maintain':
+      await cmdMaintain(parsed.positionals, parsed.values);
       break;
     case 'upgrade':
       cmdUpgrade(parsed.values);

@@ -7,6 +7,7 @@ export const CONFIG_FILE = path.join(CONFIG_DIR, 'config.yml');
 export const PROJECTS_FILE = path.join(CONFIG_DIR, 'projects.yml');
 export const ENV_DIR = path.join(CONFIG_DIR, 'env');
 export const LOGS_DIR = path.join(CONFIG_DIR, 'logs');
+export const MANAGED_CORE_STATE_DIR = path.join(CONFIG_DIR, 'managed-core');
 export const LAUNCHD_DIR = path.join(os.homedir(), 'Library', 'LaunchAgents');
 
 export function ensureConfigDir() {
