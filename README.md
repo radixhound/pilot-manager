@@ -5,8 +5,8 @@ Per-machine supervisor for `@radnine/claude-session-daemon` instances. Install i
 ## Quick Start
 
 ```bash
-# Install
-npm install -g @radnine/claude-pilot-manager
+# Install from the current pre-release GitHub source
+npm install -g git+https://github.com/radixhound/pilot-manager.git
 
 # Initialize (prompts for server URL and base port)
 pilot-manager init
@@ -73,6 +73,13 @@ pilot-manager setup ~/projects --server http://localhost:3000 --yes
 |---------|-------------|
 | `seed <target-root> [--server URL]` | Download + install the Command Center seed vault |
 
+### Managed FlightDeck maintenance
+
+| Command | Description |
+|---------|-------------|
+| `sync-core <command-center-path> [--server URL]` | Safely reconcile FlightDeck-managed core crew files |
+| `maintain <project-name> --command-center <path> [--server URL]` | Safely fast-forward a configured FlightDeck checkout, then synchronize core crew |
+
 ### Other
 
 | Command | Description |
@@ -88,6 +95,7 @@ All config lives in `~/.config/claude-pilot-manager/`:
 ~/.config/claude-pilot-manager/
 ├── config.yml        # Global settings
 ├── projects.yml      # Project registry
+├── managed-core/     # Hashed per-vault/per-server ownership state
 ├── env/
 │   ├── _default.env  # Shared env vars for all daemons
 │   └── <project>.env # Per-project env vars
@@ -140,6 +148,61 @@ and the suggested follow-up: `pilot-manager add <target-root>/command-center`.
 Extraction shells out to `tar`, so `seed` is macOS-only like the rest of
 pilot-manager. If the server returns 404, it hasn't packaged a seed yet (or is
 too old to ship one).
+
+## Synchronizing managed core crew
+
+`seed` remains create-only. Existing Command Center installations use the
+separate managed-core contract:
+
+```bash
+pilot-manager sync-core ~/projects/radnine/command-center \
+  --server http://localhost:3000
+```
+
+The command fetches FlightDeck's versioned ten-path allowlist, validates its
+UTF-8 content, SHA-256 values, entry versions, release digest, and contained
+symlinks, then preflights every destination before writing. Missing managed
+paths are installed. Identical content is adopted without a rewrite. A path
+that differs without an ownership record returns `NEEDS_DECISION`; a managed
+path changed or deleted after adoption returns `BLOCKED`. No user-created path
+outside the allowlist is changed.
+
+Ownership state lives under
+`~/.config/claude-pilot-manager/managed-core/`. File names and identity fields
+are hashes of the canonical vault path and server identity; state contains only
+the last managed release plus each path's kind and content hash. It stores no
+server URL, credential, token, or managed file content.
+
+For the bounded Flight Engineer maintenance operation, register the FlightDeck
+checkout in Pilot Manager and run:
+
+```bash
+pilot-manager maintain flight-deck \
+  --command-center ~/projects/radnine/command-center \
+  --server http://localhost:3000
+```
+
+`maintain` requires a clean Git working tree, an attached branch, a configured
+upstream, and no local-ahead or diverged state. It fetches that upstream and
+fast-forwards only when strictly behind, then runs the same managed-core sync.
+It never switches branches, rebases, resets, stashes, cleans, force-updates,
+runs migrations, installs dependencies, restarts services, or updates Pilot
+Manager itself.
+
+Both commands print one stable result token. `UPDATED` and `ALREADY_CURRENT`
+exit zero. `BLOCKED` exits 2 and `NEEDS_DECISION` exits 3 with concise evidence.
+
+## Updating Pilot Manager
+
+Pilot Manager is not published to the npm registry. During the current
+pre-release period, install or update it from GitHub:
+
+```bash
+npm install -g git+https://github.com/radixhound/pilot-manager.git
+```
+
+This documents the current delivery source; it is not a permanent release or
+publishing policy.
 
 ## Re-registering Daemons
 
