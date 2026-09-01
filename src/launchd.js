@@ -217,18 +217,37 @@ export function planServiceRefresh(status) {
 }
 
 export function installService(name) {
-  const project = getProject(name);
-  if (!project) throw new Error(`Project "${name}" not found in registry`);
+  if (isServiceLoaded(name)) {
+    // A bare `launchctl load` on an already-loaded job is a silent no-op —
+    // it reports no error but never actually reloads a stuck or wedged
+    // daemon, so `install` on a service that's already loaded must kick it
+    // the same way `restart` does (unload, then load), not leave it exactly
+    // as it was found. Reuse that path rather than reimplementing it here.
+    restartService(name);
+  } else {
+    const project = getProject(name);
+    if (!project) throw new Error(`Project "${name}" not found in registry`);
 
-  const config = loadConfig();
-  const plistXml = generatePlist(name, project, config);
-  writePlist(name, plistXml);
+    const config = loadConfig();
+    const plistXml = generatePlist(name, project, config);
+    writePlist(name, plistXml);
 
-  try {
-    execSync(`launchctl load "${plistPath(name)}"`, { encoding: 'utf8' });
-  } catch (err) {
-    throw new Error(`launchctl load failed: ${err.message}`);
+    try {
+      execSync(`launchctl load "${plistPath(name)}"`, { encoding: 'utf8' });
+    } catch (err) {
+      throw new Error(`launchctl load failed: ${err.message}`);
+    }
   }
+
+  // `launchctl load` (bare or via restartService) can report success while
+  // the daemon itself never comes up — don't call it installed until a pid
+  // actually shows, otherwise a stuck service that fails to reload reports a
+  // false "Installed" success off its old, stale pid.
+  const pid = getServicePid(name);
+  if (!pid) {
+    throw new Error(`"${name}" did not come up after install — check: pilot-manager logs ${name}`);
+  }
+  return pid;
 }
 
 export function uninstallService(name) {
