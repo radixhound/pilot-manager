@@ -23,6 +23,13 @@ export const MANAGED_CORE_ENTRIES = Object.freeze([
   { path: 'agents/quartermaster.md', kind: 'file' },
 ]);
 
+// Paths the repo owns and sync-core never writes, whatever a manifest says.
+// .claude/crew.yml is the repo's character map (FlightDeck ADR "Crew identity
+// and ranks" §1.2): renaming a character is the repo's edit, so a managed-core
+// release must never carry it. Compared case-insensitively, because macOS
+// file systems are.
+export const REPO_OWNED_PATHS = Object.freeze(['.claude/crew.yml']);
+
 class CoreSyncRefusal extends Error {
   constructor(outcome, message) {
     super(message);
@@ -123,6 +130,14 @@ export function validateCoreManifest(candidate) {
     }
     return entry.path;
   });
+
+  const repoOwned = paths.find(managedPath => REPO_OWNED_PATHS.includes(managedPath.toLowerCase()));
+  if (repoOwned) {
+    throw new CoreSyncRefusal(
+      'NEEDS_DECISION',
+      `Managed-core manifest names "${repoOwned}", which the repo owns. Pilot Manager never writes it.`,
+    );
+  }
 
   if (new Set(paths).size !== paths.length) {
     throw new CoreSyncRefusal('NEEDS_DECISION', 'Managed paths must be unique.');

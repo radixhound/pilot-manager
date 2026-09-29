@@ -11,6 +11,7 @@ process.env.HOME = TEST_HOME;
 
 const {
   MANAGED_CORE_ENTRIES,
+  REPO_OWNED_PATHS,
   fetchCoreManifest,
   managedCoreStatePath,
   syncManagedCore,
@@ -121,6 +122,22 @@ describe('managed-core manifest validation', () => {
     const unsorted = manifest();
     [unsorted.entries[0], unsorted.entries[1]] = [unsorted.entries[1], unsorted.entries[0]];
     assert.throws(() => validateCoreManifest(unsorted), /sorted/i);
+  });
+
+  it('refuses a manifest entry for the repo-owned .claude/crew.yml, in any case', () => {
+    assert.deepEqual(REPO_OWNED_PATHS, ['.claude/crew.yml']);
+    assert.equal(MANAGED_CORE_ENTRIES.some(entry => entry.path === '.claude/crew.yml'), false);
+
+    for (const crewPath of ['.claude/crew.yml', '.claude/Crew.yml']) {
+      const withCrew = manifest();
+      withCrew.entries.push({ path: crewPath, kind: 'file', content: 'area: radnine\ncrew: {}\n' });
+      assert.throws(() => validateCoreManifest(finalizeManifest(withCrew.entries)), error => {
+        assert.equal(error.outcome, 'NEEDS_DECISION');
+        assert.match(error.message, /repo owns/);
+        assert.ok(error.message.includes(crewPath));
+        return true;
+      });
+    }
   });
 
   it('refuses unsupported kinds, non-scalar UTF-8 content, and escaping symlinks', () => {
@@ -356,6 +373,25 @@ describe('syncManagedCore', () => {
       fetchImpl: async () => responseFor({ error: 'unavailable' }, { status: 500 }),
     });
     assert.equal(unavailable.outcome, 'BLOCKED');
+  });
+
+  it('never writes .claude/crew.yml, even from a manifest that carries it', async () => {
+    const crewPath = path.join(vault, '.claude', 'crew.yml');
+    const original = 'area: radnine\ncrew:\n  chief-of-staff:\n    name: Master Chief\n';
+    fs.mkdirSync(path.dirname(crewPath), { recursive: true });
+    fs.writeFileSync(crewPath, original);
+    const withCrew = manifest();
+    withCrew.entries.push({ path: '.claude/crew.yml', kind: 'file', content: 'crew: {}\n' });
+
+    const result = await syncManagedCore(vault, SERVER, {
+      fetchImpl: async () => responseFor(finalizeManifest(withCrew.entries)),
+    });
+
+    assert.equal(result.outcome, 'NEEDS_DECISION');
+    assert.match(result.evidence.join(' '), /repo owns/);
+    assert.deepEqual(result.changedPaths, []);
+    assert.equal(fs.readFileSync(crewPath, 'utf8'), original);
+    assert.equal(fs.existsSync(path.join(vault, 'agents')), false);
   });
 
   it('refuses identity-valid ownership state behind a symlinked state directory before vault mutation', async () => {
