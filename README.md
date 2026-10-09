@@ -185,7 +185,9 @@ pilot-manager maintain flight-deck \
 `maintain` requires a clean Git working tree, an attached branch, a configured
 upstream, and no local-ahead or diverged state. It fetches that upstream and
 fast-forwards only when strictly behind, then runs the same managed-core sync.
-It never switches branches, rebases, resets, stashes, cleans, force-updates,
+If the incoming commits touch `db/migrate/`, `Gemfile.lock`, or `package.json`
+or `package-lock.json` at the root or in `daemon/`, it stops with `NEEDS_DECISION` before the fast-forward and
+lists those files and the human steps. It never switches branches, rebases, resets, stashes, cleans, force-updates,
 runs migrations, installs dependencies, restarts services, or updates Pilot
 Manager itself.
 

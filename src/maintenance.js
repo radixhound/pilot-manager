@@ -46,6 +46,30 @@ function parseAheadBehind(output) {
   return { ahead: Number(match[1]), behind: Number(match[2]) };
 }
 
+// Incoming changes the live app or the npm-linked pilot daemons can't pick up
+// from a fast-forward alone.
+const DAEMON_PACKAGE_FILES = ['daemon/package.json', 'daemon/package-lock.json'];
+
+function needsHumanStep(file) {
+  return file.startsWith('db/migrate/')
+    || file === 'Gemfile.lock'
+    || file === 'package.json'
+    || file === 'package-lock.json'
+    || DAEMON_PACKAGE_FILES.includes(file);
+}
+
+function humanSteps(files) {
+  const steps = ['fast-forward the checkout (git merge --ff-only @{upstream})'];
+  if (files.includes('Gemfile.lock')) steps.push('run bundle install');
+  if (files.some(file => file === 'package.json' || file === 'package-lock.json')) steps.push('run npm install');
+  if (files.some(file => DAEMON_PACKAGE_FILES.includes(file))) steps.push('run npm install in daemon/');
+  if (files.some(file => file.startsWith('db/migrate/'))) steps.push('run bin/rails db:migrate');
+  steps.push('restart FlightDeck');
+  if (files.some(file => DAEMON_PACKAGE_FILES.includes(file))) steps.push('restart the pilots (pilot-manager restart)');
+  steps.push('rerun pilot-manager maintain to sync core crew');
+  return `Human steps: ${steps.join(', then ')}.`;
+}
+
 function inspectAndUpdateCheckout(projectPath, git) {
   const canonicalProject = canonicalDirectory(path.resolve(projectPath));
   if (!canonicalProject) {
@@ -151,6 +175,26 @@ function inspectAndUpdateCheckout(projectPath, git) {
   }
   if (counts.behind === 0) {
     return result('ALREADY_CURRENT', ['FlightDeck checkout is already at its upstream commit.']);
+  }
+
+  let incoming;
+  try {
+    incoming = runGit(
+      git,
+      ['diff', '--name-only', '--no-renames', '-z', 'HEAD', '@{upstream}'],
+      canonicalProject,
+      'FlightDeck incoming changes could not be listed.',
+    ).split('\0').filter(Boolean);
+  } catch (error) {
+    return result('BLOCKED', [error.message]);
+  }
+  const flagged = incoming.filter(needsHumanStep);
+  if (flagged.length > 0) {
+    return result('NEEDS_DECISION', [
+      'Incoming commits change migrations or dependencies; no Git update or core sync was attempted.',
+      ...flagged.map(file => `Incoming: ${file}`),
+      humanSteps(flagged),
+    ]);
   }
 
   try {
