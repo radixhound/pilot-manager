@@ -337,11 +337,13 @@ describe('maintainFlightDeck against a real checkout with an upstream', () => {
     assert.match(evidence, /restart FlightDeck/);
   });
 
-  it('returns NEEDS_DECISION for incoming Gemfile.lock, package.json, and package-lock.json changes', async t => {
+  it('returns NEEDS_DECISION for incoming Gemfile.lock and root or daemon/ package.json and package-lock.json changes', async t => {
     for (const [file, step] of [
       ['Gemfile.lock', /bundle install/],
       ['package.json', /npm install/],
       ['package-lock.json', /npm install/],
+      ['daemon/package.json', /npm install in daemon\/.*pilot-manager restart/],
+      ['daemon/package-lock.json', /npm install in daemon\/.*pilot-manager restart/],
     ]) {
       await t.test(file, async () => {
         const { checkout } = checkoutBehindUpstream(file);

@@ -46,20 +46,27 @@ function parseAheadBehind(output) {
   return { ahead: Number(match[1]), behind: Number(match[2]) };
 }
 
-// Incoming changes the live app can't pick up from a fast-forward alone.
+// Incoming changes the live app or the npm-linked pilot daemons can't pick up
+// from a fast-forward alone.
+const DAEMON_PACKAGE_FILES = ['daemon/package.json', 'daemon/package-lock.json'];
+
 function needsHumanStep(file) {
   return file.startsWith('db/migrate/')
     || file === 'Gemfile.lock'
     || file === 'package.json'
-    || file === 'package-lock.json';
+    || file === 'package-lock.json'
+    || DAEMON_PACKAGE_FILES.includes(file);
 }
 
 function humanSteps(files) {
   const steps = ['fast-forward the checkout (git merge --ff-only @{upstream})'];
   if (files.includes('Gemfile.lock')) steps.push('run bundle install');
   if (files.some(file => file === 'package.json' || file === 'package-lock.json')) steps.push('run npm install');
+  if (files.some(file => DAEMON_PACKAGE_FILES.includes(file))) steps.push('run npm install in daemon/');
   if (files.some(file => file.startsWith('db/migrate/'))) steps.push('run bin/rails db:migrate');
-  steps.push('restart FlightDeck', 'rerun pilot-manager maintain to sync core crew');
+  steps.push('restart FlightDeck');
+  if (files.some(file => DAEMON_PACKAGE_FILES.includes(file))) steps.push('restart the pilots (pilot-manager restart)');
+  steps.push('rerun pilot-manager maintain to sync core crew');
   return `Human steps: ${steps.join(', then ')}.`;
 }
 
