@@ -145,7 +145,7 @@ projects:
   my-project:
     path: /Users/me/my-project
     port: 3601
-    pilot_id: my-project-pilot
+    pilot_id: my-project-pilot-my-mac-me   # <name>-pilot-<hostname>-<user>
     auth_token: null
     auto_restart: true
     extra_env:

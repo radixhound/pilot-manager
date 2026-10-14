@@ -94,6 +94,17 @@ export async function registerPilot(serverUrl, projectName, projectConfig, optio
   }
 
   const text = await response.text();
+
+  // The pilot id belongs to another machine. --force can't get past this, so
+  // show the server's explanation as is, with no "use --force" hint.
+  if (response.status === 422) {
+    let data = null;
+    try { data = JSON.parse(text); } catch { /* not JSON */ }
+    if (data?.reason === 'machine_conflict' && data.error) {
+      throw new Error(data.error);
+    }
+  }
+
   throw new Error(`Registration failed (${response.status}): ${text}`);
 }
 
@@ -140,16 +151,10 @@ export async function registerProject(name, options = {}) {
   const globalConfig = loadConfig();
   const serverUrl = options.server || globalConfig.server_url;
 
-  // If force re-registering, revoke the old token first (ignore failures —
-  // the token may already be invalid, which is fine)
-  if (options.force && project.auth_token) {
-    try {
-      await revokeToken(serverUrl, project.auth_token);
-    } catch {
-      // Token may already be invalid or server may have purged it — proceed
-    }
-  }
-
+  // No client-side revoke on --force: the server revokes the old tokens in
+  // the same transaction that issues the new one. Revoking first would kill
+  // the owning machine's token even when the server then refuses the
+  // register (a copied projects.yml on the wrong Mac).
   const result = await registerPilot(serverUrl, name, project, options);
 
   // Save token to registry

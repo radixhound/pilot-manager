@@ -11,7 +11,8 @@ const TEST_DIR = path.join(os.tmpdir(), `pilot-manager-registrar-test-${process.
 process.env.HOME = TEST_DIR;
 fs.mkdirSync(path.join(TEST_DIR, '.config', 'claude-pilot-manager'), { recursive: true });
 
-const { gitRemoteFor, registerPilot } = await import('../src/registrar.js');
+const { gitRemoteFor, registerPilot, registerProject } = await import('../src/registrar.js');
+const { addProject } = await import('../src/registry.js');
 
 // Build a throwaway git repo with the given origin and return its path.
 function makeRepo(remote) {
@@ -100,5 +101,85 @@ describe('registerPilot payload', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('registerProject --force', () => {
+  const realFetch = global.fetch;
+  let calls;
+
+  beforeEach(() => {
+    calls = [];
+    const projectsFile = path.join(TEST_DIR, '.config', 'claude-pilot-manager', 'projects.yml');
+    if (fs.existsSync(projectsFile)) fs.unlinkSync(projectsFile);
+    addProject('forced', path.join(TEST_DIR, 'forced'));
+    const data = fs.readFileSync(projectsFile, 'utf8').replace('auth_token: null', 'auth_token: old-token');
+    fs.writeFileSync(projectsFile, data);
+  });
+
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  it('registers without revoking the stored token first', async () => {
+    global.fetch = async (url, opts) => {
+      calls.push({ url, method: opts?.method, body: opts?.body && JSON.parse(opts.body) });
+      return {
+        status: 201,
+        json: async () => ({
+          pilot: { pilot_id: 'forced-pilot' },
+          authentication: { api_key: 'new-token', token_type: 'Bearer' },
+        }),
+      };
+    };
+    const result = await registerProject('forced', { server: 'http://localhost:3000', force: true });
+    assert.deepEqual(calls.map(c => c.url), ['http://localhost:3000/api/pilot_auth/register']);
+    assert.equal(calls[0].body.force, true);
+    assert.equal(result.auth_token, 'new-token');
+  });
+
+  it('makes no revoke call when the server refuses with machine_conflict', async () => {
+    const message = "Pilot 'forced-pilot' is registered to machine 'mini', but this request came from 'studio'.";
+    global.fetch = async (url, opts) => {
+      calls.push({ url, method: opts?.method });
+      return { status: 422, text: async () => JSON.stringify({ error: message, reason: 'machine_conflict' }) };
+    };
+    await assert.rejects(
+      registerProject('forced', { server: 'http://localhost:3000', force: true }),
+      err => err.message === message,
+    );
+    assert.ok(!calls.some(c => c.url.endsWith('/revoke')), JSON.stringify(calls));
+  });
+});
+
+describe('registerPilot 422 machine_conflict', () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  it('surfaces the server error text as is, with no --force hint', async () => {
+    const message = "Pilot 'p-pilot-mini' is registered to machine 'mini', but this request came from 'studio'. " +
+      '(--force does not override this)';
+    global.fetch = async () => ({
+      status: 422,
+      text: async () => JSON.stringify({ error: message, reason: 'machine_conflict' }),
+    });
+    await assert.rejects(
+      registerPilot('http://localhost:3000', 'p', { pilot_id: 'p-pilot-mini', port: 3601, path: TEST_DIR }),
+      err => {
+        assert.equal(err.message, message);
+        assert.doesNotMatch(err.message, /Use --force/);
+        return true;
+      },
+    );
+  });
+
+  it('keeps the generic message for other 422s', async () => {
+    global.fetch = async () => ({ status: 422, text: async () => '{"errors":["bad"]}' });
+    await assert.rejects(
+      registerPilot('http://localhost:3000', 'p', { pilot_id: 'p', port: 3601, path: TEST_DIR }),
+      /Registration failed \(422\): \{"errors":\["bad"\]\}/,
+    );
   });
 });

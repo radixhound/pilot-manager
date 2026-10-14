@@ -55,6 +55,27 @@ export function nextAvailablePort() {
   return port;
 }
 
+// The daemon puts the pilot id into `/cable?pilot_id=` without encoding it,
+// so anything outside the URL-unreserved set becomes `-`.
+function urlSafe(part) {
+  return String(part).replace(/[^A-Za-z0-9._~-]/g, '-');
+}
+
+function currentUsername() {
+  try {
+    return os.userInfo().username;
+  } catch {
+    return process.env.USER || process.env.LOGNAME || 'user';
+  }
+}
+
+// Every new pilot id is minted here: `<name>-pilot-<hostname>-<user>`.
+// The user part keeps two macOS users on one Mac (or two Macs sharing a
+// hostname) from colliding. Ids already in projects.yml are never rewritten.
+export function mintPilotId(name, { hostname = os.hostname(), username = currentUsername() } = {}) {
+  return `${name}-pilot-${urlSafe(hostname)}-${urlSafe(username)}`;
+}
+
 export function addProject(name, projectPath, options = {}) {
   const data = loadRaw();
 
@@ -67,7 +88,7 @@ export function addProject(name, projectPath, options = {}) {
   data.projects[name] = {
     path: projectPath,
     port,
-    pilot_id: `${name}-pilot-${os.hostname()}`,
+    pilot_id: mintPilotId(name),
     auth_token: null,
     auto_restart: true,
     extra_env: {},
