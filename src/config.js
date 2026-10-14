@@ -5,20 +5,28 @@ import yaml from 'js-yaml';
 import { CONFIG_FILE, ENV_DIR, ensureConfigDir } from './paths.js';
 
 const DEFAULTS = {
-  server_url: 'http://localhost:3000',
   base_port: 3601,
   auto_restart: true,
   log_level: 'info',
   max_sessions_per_project: 10,
 };
 
+// With no server_url in config.yml, fall back to the shell's FLIGHTDECK_URL,
+// then localhost. Read on every load so the env at call time counts.
+function defaults() {
+  return {
+    server_url: process.env.FLIGHTDECK_URL || 'http://localhost:3000',
+    ...DEFAULTS,
+  };
+}
+
 export function loadConfig() {
   if (!fs.existsSync(CONFIG_FILE)) {
-    return { ...DEFAULTS };
+    return defaults();
   }
   const raw = fs.readFileSync(CONFIG_FILE, 'utf8');
   const parsed = yaml.load(raw) || {};
-  return { ...DEFAULTS, ...parsed };
+  return { ...defaults(), ...parsed };
 }
 
 export function saveConfig(config) {
@@ -92,8 +100,11 @@ export function resolveEnvVars(projectName, projectConfig, globalConfig) {
     env.CLAUDE_AUTH_TOKEN = projectConfig.auth_token;
   }
   env.CLAUDE_DAEMON_MODE = 'actioncable';
+  // The daemon reads CLAUDE_RAILS_URL; the sessions it spawns inherit
+  // FLIGHTDECK_URL, which the project's .mcp.json reads.
   if (globalConfig.server_url) {
     env.CLAUDE_RAILS_URL = globalConfig.server_url;
+    env.FLIGHTDECK_URL = globalConfig.server_url;
   }
 
   return env;

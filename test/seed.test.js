@@ -10,6 +10,8 @@ import { execSync } from 'node:child_process';
 const TEST_DIR = path.join(os.tmpdir(), `pilot-manager-seed-test-${process.pid}`);
 const origHome = process.env.HOME;
 process.env.HOME = TEST_DIR;
+// These tests assert the localhost default; pilot sessions set FLIGHTDECK_URL.
+delete process.env.FLIGHTDECK_URL;
 fs.mkdirSync(path.join(TEST_DIR, '.config', 'claude-pilot-manager'), { recursive: true });
 
 const { fetchSeedTarball, seedCommandCenter, verifyVault } = await import('../src/seed.js');
