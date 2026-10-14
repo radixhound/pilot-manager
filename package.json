@@ -1,6 +1,6 @@
 {
   "name": "@radnine/claude-pilot-manager",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Per-machine supervisor for @radnine/claude-session-daemon instances",
   "type": "module",
   "bin": {
