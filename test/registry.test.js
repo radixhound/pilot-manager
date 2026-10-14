@@ -7,6 +7,9 @@ import os from 'node:os';
 // Override config dir for tests
 const TEST_DIR = path.join(os.tmpdir(), `pilot-manager-test-${Date.now()}`);
 const origHome = process.env.HOME;
+// loadConfig falls back to FLIGHTDECK_URL; pilot sessions have it set.
+const origFlightdeckUrl = process.env.FLIGHTDECK_URL;
+delete process.env.FLIGHTDECK_URL;
 
 // We need to patch paths before importing modules.
 // The modules use os.homedir() which reads HOME env var.
@@ -21,6 +24,7 @@ describe('Config', () => {
     // Clean config between tests
     const configFile = path.join(TEST_DIR, '.config', 'claude-pilot-manager', 'config.yml');
     if (fs.existsSync(configFile)) fs.unlinkSync(configFile);
+    delete process.env.FLIGHTDECK_URL;
   });
 
   it('returns defaults when no config file exists', () => {
@@ -38,6 +42,20 @@ describe('Config', () => {
     assert.equal(config.server_url, 'https://example.com');
     assert.equal(config.base_port, 4000);
     assert.equal(config.auto_restart, false);
+  });
+
+  it('defaults server_url to FLIGHTDECK_URL when config has none', () => {
+    process.env.FLIGHTDECK_URL = 'https://flightdeck.example.ts.net';
+    assert.equal(loadConfig().server_url, 'https://flightdeck.example.ts.net');
+
+    saveConfig({ base_port: 4000 });
+    assert.equal(loadConfig().server_url, 'https://flightdeck.example.ts.net');
+  });
+
+  it('prefers config server_url over FLIGHTDECK_URL', () => {
+    process.env.FLIGHTDECK_URL = 'https://flightdeck.example.ts.net';
+    saveConfig({ server_url: 'https://configured.example.com' });
+    assert.equal(loadConfig().server_url, 'https://configured.example.com');
   });
 });
 
@@ -162,7 +180,19 @@ describe('Environment Variables', () => {
     assert.equal(env.CLAUDE_AUTH_TOKEN, 'test-token');
     assert.equal(env.CLAUDE_DAEMON_MODE, 'actioncable');
     assert.equal(env.CLAUDE_RAILS_URL, 'http://localhost:3000');
+    assert.equal(env.FLIGHTDECK_URL, 'http://localhost:3000');
     assert.equal(env.CUSTOM_VAR, 'custom-value');
+  });
+
+  it('sets FLIGHTDECK_URL from server_url, overriding env files', () => {
+    const envDir = path.join(TEST_DIR, '.config', 'claude-pilot-manager', 'env');
+    fs.writeFileSync(path.join(envDir, 'urlproj.env'), 'FLIGHTDECK_URL=http://stale:3000\n');
+
+    const env = resolveEnvVars('urlproj', { path: '/tmp', port: 3601 }, { server_url: 'https://flightdeck.example.ts.net' });
+    assert.equal(env.CLAUDE_RAILS_URL, 'https://flightdeck.example.ts.net');
+    assert.equal(env.FLIGHTDECK_URL, 'https://flightdeck.example.ts.net');
+
+    fs.unlinkSync(path.join(envDir, 'urlproj.env'));
   });
 
   it('reads env files', () => {
@@ -183,5 +213,7 @@ describe('Environment Variables', () => {
 // Restore HOME
 after(() => {
   process.env.HOME = origHome;
+  if (origFlightdeckUrl === undefined) delete process.env.FLIGHTDECK_URL;
+  else process.env.FLIGHTDECK_URL = origFlightdeckUrl;
   fs.rmSync(TEST_DIR, { recursive: true, force: true });
 });

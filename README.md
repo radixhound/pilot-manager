@@ -114,6 +114,30 @@ log_level: info
 max_sessions_per_project: 10
 ```
 
+### Server URL
+
+`server_url` is the one place each machine records which FlightDeck its pilots
+talk to. `install` and `restart` write it into every daemon's plist as two
+variables:
+
+- `CLAUDE_RAILS_URL`, which the daemon reads.
+- `FLIGHTDECK_URL`, which every Claude session the daemon starts inherits. The
+  project's `.mcp.json` reads it to reach the FlightDeck MCP server.
+
+Both always come from `server_url`, even if an env file or `extra_env` sets
+them. If `config.yml` has no `server_url`, pilot-manager uses `FLIGHTDECK_URL`
+from your shell, and `http://localhost:3000` if that is unset too.
+
+On the machine that runs FlightDeck, localhost works. Another Mac reaches it
+over the tailnet:
+
+```bash
+pilot-manager setup ~/projects --server https://macmini2.swordfish-fir.ts.net --yes
+```
+
+After changing `server_url`, run `pilot-manager restart` so each plist picks up
+the new value.
+
 ### projects.yml
 
 ```yaml
