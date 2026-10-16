@@ -19,8 +19,34 @@ export function plistPath(name) {
   return path.join(LAUNCHD_DIR, `${label(name)}.plist`);
 }
 
-export function resolveNodeBinary() {
-  return process.execPath;
+// Stable symlinks that typically point at the active Homebrew-managed node.
+// We prefer one of these over process.execPath because execPath is a
+// version-pinned real path (e.g. /opt/homebrew/Cellar/node/<version>/bin/node)
+// that disappears when node is upgraded — which silently breaks the generated
+// LaunchAgent the next time launchd cold-starts it. A stable symlink survives
+// version bumps.
+export const STABLE_NODE_SYMLINKS = ['/opt/homebrew/bin/node', '/usr/local/bin/node'];
+
+// Resolve the node binary to embed in a plist. Returns a stable symlink path
+// when one resolves to the *same* binary as the running node; otherwise falls
+// back to process.execPath (preserving prior behavior on Linux/CI, nvm, mise,
+// and anywhere no matching symlink exists).
+export function resolveNodeBinary(candidates = STABLE_NODE_SYMLINKS) {
+  const actual = process.execPath;
+  let actualReal;
+  try {
+    actualReal = fs.realpathSync(actual);
+  } catch {
+    return actual;
+  }
+  for (const candidate of candidates) {
+    try {
+      if (fs.realpathSync(candidate) === actualReal) return candidate;
+    } catch {
+      // candidate missing or unreadable — try the next one
+    }
+  }
+  return actual;
 }
 
 export function resolveDaemonEntry() {
