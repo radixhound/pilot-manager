@@ -257,6 +257,18 @@ The pilot-manager generates macOS launchd plist files for each registered projec
 - Start on boot (`RunAtLoad`)
 - Log stdout/stderr to files
 
+The plist runs node through a path that outlives one node version: the
+Homebrew symlink, the mise, asdf or Volta shim, fnm's default alias, or nvm's
+`nvm-exec` with the default alias. If the daemon lives inside that node's
+versioned install, the plist finds it at launch in whichever node version is
+current. Versioned node and ruby dirs in `PATH` are swapped for their
+manager's shim dir. With none of these (Linux, CI, a plain installer node) the
+plist uses the running node's own path, as before.
+
+After a node upgrade under nvm, mise, asdf or fnm, install the daemon in the
+new version (`npm install -g @radnine/claude-session-daemon`); global packages
+do not move between versions. Homebrew and Volta keep them.
+
 The pilot-manager itself is **not** a long-running process. It's a CLI that generates configuration and delegates process management to launchd.
 
 ## Requirements
