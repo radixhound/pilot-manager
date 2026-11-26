@@ -14,6 +14,7 @@ import {
   installAll, uninstallAll,
   getServiceStatus, getServicePid, planServiceRefresh,
   logPath, plistPath, resolveDaemonEntry,
+  ConfigDirGuardError, ACCEPT_CONFIG_DIR_FLAG,
 } from './launchd.js';
 import {
   registerProject, deregisterProject, registerAll,
@@ -66,7 +67,24 @@ Other:
 Options:
   --help, -h    Show help for a command
   --yes, -y     Skip confirmation prompts
+  --accept-config-dir-change
+                With install, restart, reinstall, register, setup or upgrade:
+                rewrite a pilot's plist even though its CLAUDE_CONFIG_DIR or
+                CODEX_HOME would change. Without it, those commands leave
+                that pilot's plist and daemon as they are. A folder that does
+                not exist is refused either way.
 `.trim();
+
+// Options for installService/restartService from parsed CLI flags.
+function serviceOptions(args = {}) {
+  return { acceptConfigDirChange: Boolean(args['accept-config-dir-change']) };
+}
+
+function reportRefusals(refused) {
+  if (refused.length === 0) return;
+  console.error(`\nLeft unchanged: ${refused.join(', ')}. See above, then re-run (add ${ACCEPT_CONFIG_DIR_FLAG} to accept the change).`);
+  process.exit(1);
+}
 
 function prompt(question) {
   const rl = readline.createInterface({
@@ -245,11 +263,12 @@ async function cmdScan(positionals, args) {
   console.log(`\n${added} project(s) added.`);
 }
 
-function cmdInstall(positionals) {
+function cmdInstall(positionals, args = {}) {
+  const options = serviceOptions(args);
   if (positionals.length > 0) {
     const name = positionals[0];
     try {
-      installService(name);
+      installService(name, options);
       const pid = getServicePid(name);
       console.log(`Installed "${name}"${pid ? ` (PID ${pid})` : ''}`);
     } catch (err) {
@@ -257,7 +276,7 @@ function cmdInstall(positionals) {
       process.exit(1);
     }
   } else {
-    const results = installAll();
+    const results = installAll(options);
     for (const r of results) {
       if (r.success) {
         console.log(`Installed "${r.name}"${r.pid ? ` (PID ${r.pid})` : ''}`);
@@ -267,6 +286,7 @@ function cmdInstall(positionals) {
     }
     const ok = results.filter(r => r.success).length;
     console.log(`\n${ok}/${results.length} services installed.`);
+    reportRefusals(results.filter(r => r.refused).map(r => r.name));
   }
 }
 
@@ -327,17 +347,21 @@ function cmdStop(positionals) {
   }
 }
 
-function cmdRestart(positionals) {
+function cmdRestart(positionals, args = {}) {
+  const options = serviceOptions(args);
   const names = positionals.length > 0 ? [positionals[0]] : listProjects().map(p => p.name);
+  const refused = [];
   for (const name of names) {
     try {
-      restartService(name);
+      restartService(name, options);
       const pid = getServicePid(name);
       console.log(`Restarted "${name}"${pid ? ` (PID ${pid})` : ''}`);
     } catch (err) {
+      if (err instanceof ConfigDirGuardError) refused.push(name);
       console.error(`Failed to restart "${name}": ${err.message}`);
     }
   }
+  reportRefusals(refused);
 }
 
 function cmdLogs(positionals, args) {
@@ -371,7 +395,7 @@ function cmdLogs(positionals, args) {
 // yet — the token gets baked in at first install. Never throws: a refresh failure
 // after a successful registration must NOT read as a registration failure, so it's
 // reported with a `reinstall` retry pointer and returned to the caller to decide.
-function refreshServiceIfInstalled(name) {
+function refreshServiceIfInstalled(name, options = {}) {
   const plan = planServiceRefresh(getServiceStatus(name));
 
   if (plan.action === 'skip') {
@@ -380,14 +404,21 @@ function refreshServiceIfInstalled(name) {
   }
 
   try {
-    restartService(name);
+    restartService(name, options);
     const pid = getServicePid(name);
     console.log(`  Reinstalled service "${name}"${pid ? ` (PID ${pid})` : ''} to apply the new token.`);
     return { installed: true, refreshed: true, pid };
   } catch (err) {
-    console.error(`  Token saved, but reloading the service failed: ${err.message}`);
-    console.error(`  Retry: pilot-manager reinstall ${name}`);
-    return { installed: true, refreshed: false, error: err.message };
+    const refused = err instanceof ConfigDirGuardError;
+    if (refused) {
+      console.error('  Token saved, but the service was left on its old token because its config folder would change:');
+      console.error(err.message.replace(/^/gm, '  '));
+      console.error(`  After fixing, retry: pilot-manager reinstall ${name}  (or: pilot-manager reinstall ${name} ${ACCEPT_CONFIG_DIR_FLAG})`);
+    } else {
+      console.error(`  Token saved, but reloading the service failed: ${err.message}`);
+      console.error(`  Retry: pilot-manager reinstall ${name}`);
+    }
+    return { installed: true, refreshed: false, refused, error: err.message };
   }
 }
 
@@ -414,7 +445,7 @@ async function cmdRegister(positionals, args) {
       }
       const result = await registerProject(name, options);
       console.log(`Registered "${name}" — token: ${result.auth_token?.slice(0, 8)}...`);
-      refreshServiceIfInstalled(name);
+      refreshServiceIfInstalled(name, serviceOptions(args));
     } catch (err) {
       console.error(`Error: ${err.message}`);
       process.exit(1);
@@ -424,7 +455,7 @@ async function cmdRegister(positionals, args) {
     for (const r of results) {
       if (r.success) {
         console.log(`Registered "${r.name}" — token: ${r.auth_token?.slice(0, 8)}...`);
-        refreshServiceIfInstalled(r.name);
+        refreshServiceIfInstalled(r.name, serviceOptions(args));
       } else if (r.skipped) {
         console.log(`Skipped "${r.name}" (${r.error})`);
       } else {
@@ -538,11 +569,11 @@ async function setupSingleProject(projectPath, name, args) {
   if (alreadyInstalled) {
     // Same rule as `register`: refresh the installed service so the freshly-saved
     // token takes effect (a plain `launchctl load` would fail "already loaded").
-    const refresh = refreshServiceIfInstalled(name);
+    const refresh = refreshServiceIfInstalled(name, serviceOptions(args));
     if (refresh.error) process.exit(1);
   } else {
     try {
-      installService(name);
+      installService(name, serviceOptions(args));
       const pid = getServicePid(name);
       console.log(`Installed "${name}"${pid ? ` (PID ${pid})` : ''}`);
     } catch (err) {
@@ -598,7 +629,7 @@ async function cmdSetup(positionals, args) {
 
   // Step 4: Install
   console.log('\n--- Installing launchd services ---');
-  cmdInstall([]);
+  cmdInstall([], args);
 }
 
 async function cmdSeed(positionals, args) {
@@ -703,15 +734,19 @@ function cmdUpgrade(args) {
 
   if (installed.length > 0) {
     console.log(`\nRestarting ${installed.length} service(s)...`);
+    const options = serviceOptions(args);
+    const refused = [];
     for (const p of installed) {
       try {
-        restartService(p.name);
+        restartService(p.name, options);
         const pid = getServicePid(p.name);
         console.log(`  Restarted "${p.name}"${pid ? ` (PID ${pid})` : ''}`);
       } catch (err) {
+        if (err instanceof ConfigDirGuardError) refused.push(p.name);
         console.error(`  Failed "${p.name}": ${err.message}`);
       }
     }
+    reportRefusals(refused);
   } else {
     console.log('\nNo installed services to restart.');
   }
@@ -775,6 +810,7 @@ export async function run(argv) {
         lines: { type: 'string' },
         version: { type: 'string' },
         'command-center': { type: 'string' },
+        'accept-config-dir-change': { type: 'boolean', default: false },
       },
       allowPositionals: true,
       strict: false,
@@ -806,7 +842,7 @@ export async function run(argv) {
       await cmdScan(parsed.positionals, parsed.values);
       break;
     case 'install':
-      cmdInstall(parsed.positionals);
+      cmdInstall(parsed.positionals, parsed.values);
       break;
     case 'uninstall':
       cmdUninstall(parsed.positionals);
@@ -819,7 +855,7 @@ export async function run(argv) {
       break;
     case 'restart':
     case 'reinstall':
-      cmdRestart(parsed.positionals);
+      cmdRestart(parsed.positionals, parsed.values);
       break;
     case 'logs':
       cmdLogs(parsed.positionals, parsed.values);
