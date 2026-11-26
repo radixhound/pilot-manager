@@ -217,6 +217,20 @@ describe('plistEnvironment', () => {
     assert.equal(plistEnvironment(xml).CLAUDE_CONFIG_DIR, '/a & <b>');
   });
 
+  it('ignores commented-out settings and reads CDATA values', () => {
+    const xml = '<key>EnvironmentVariables</key>\n<dict>\n' +
+      '<key>CLAUDE_CONFIG_DIR</key><string>/active</string>\n' +
+      '<!-- <key>CLAUDE_CONFIG_DIR</key><string>/commented</string> -->\n' +
+      '<!-- </dict> --><key>CODEX_HOME</key><string><![CDATA[/c & d]]></string>\n</dict>';
+    assert.deepEqual(plistEnvironment(xml), { CLAUDE_CONFIG_DIR: '/active', CODEX_HOME: '/c & d' });
+  });
+
+  it('ignores a commented-out EnvironmentVariables block', () => {
+    const xml = '<!-- <key>EnvironmentVariables</key><dict><key>CODEX_HOME</key><string>/old</string></dict> -->\n' +
+      '<key>EnvironmentVariables</key>\n<dict>\n<key>CODEX_HOME</key><string>/new</string>\n</dict>';
+    assert.deepEqual(plistEnvironment(xml), { CODEX_HOME: '/new' });
+  });
+
   it('reads a plutil-style layout with tabs and an empty <string/>', () => {
     const xml = '<dict>\n\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>CODEX_HOME</key>\n' +
       '\t\t<string>/x/codex</string>\n\t\t<key>EMPTY</key>\n\t\t<string/>\n\t</dict>\n</dict>';
@@ -282,6 +296,23 @@ describe('restart refuses a changed config folder', () => {
     assertUntouched('viv', before, text);
   });
 
+  it('a commented-out value after the active one does not hide a change', async () => {
+    await installed({ viv: { CLAUDE_CONFIG_DIR: DIRS.a } });
+    const xml = readPlist('viv').replace(
+      `<string>${DIRS.a}</string>\n`,
+      `<string>${DIRS.a}</string>\n    <!-- <key>CLAUDE_CONFIG_DIR</key><string>${DIRS.b}</string> -->\n`);
+    fs.writeFileSync(plistFile('viv'), xml);
+    const before = readPlist('viv');
+    writeProjects({ viv: { CLAUDE_CONFIG_DIR: DIRS.b } });
+
+    const { exitCode, text } = await cli(['restart', 'viv']);
+
+    assert.equal(exitCode, 1, text);
+    assertUntouched('viv', before, text);
+    assert.ok(text.includes(`installed plist:           ${DIRS.a}`), text);
+    assert.ok(text.includes(`pilot-manager would write: ${DIRS.b}`), text);
+  });
+
   it('--accept-config-dir-change writes the new value and restarts', async () => {
     await installed({ viv: { CLAUDE_CONFIG_DIR: DIRS.a } });
     writeProjects({ viv: { CLAUDE_CONFIG_DIR: DIRS.b } });
@@ -328,6 +359,8 @@ describe('a folder that does not exist', () => {
     assert.equal(exitCode, 1, text);
     assertUntouched('viv', before, text);
     assert.match(text, /--accept-config-dir-change does not skip this check/);
+    assert.ok(text.includes(`installed plist:           ${DIRS.a}`), text);
+    assert.ok(text.includes(`pilot-manager would write: ${DIRS.missing}`), text);
   });
 
   it('a file in place of the folder counts as missing', async () => {

@@ -354,8 +354,14 @@ function unescapeXml(str) {
 
 // The EnvironmentVariables of an XML plist, as a plain object. Handles the
 // layout generatePlist writes and the one plutil/PlistBuddy write after a
-// hand edit (tabs, <string/> for an empty value).
-export function plistEnvironment(xml) {
+// hand edit (tabs, <string/> for an empty value). Comments are dropped and
+// CDATA sections read as text, as launchd reads them, so a commented-out
+// setting can't stand in for the active one.
+export function plistEnvironment(rawXml) {
+  // One pass, so whichever starts first wins: "<!--" inside CDATA is text,
+  // and "<![CDATA[" inside a comment is comment.
+  const xml = rawXml.replace(/<!\[CDATA\[([\s\S]*?)\]\]>|<!--[\s\S]*?-->/g,
+    (_, cdata) => (cdata === undefined ? '' : escapeXml(cdata)));
   const block = xml.match(/<key>\s*EnvironmentVariables\s*<\/key>\s*<dict>([\s\S]*?)<\/dict>/);
   if (!block) return {};
   const env = {};
@@ -423,6 +429,8 @@ export function guardConfigDirs(name, newPlistXml, {
     if (wanted !== undefined && !isDir(wanted)) {
       problems.push(
         `Did not touch "${name}": ${key} names a folder that does not exist: ${wanted}\n` +
+        `  installed plist:           ${shown(installed)}\n` +
+        `  pilot-manager would write: ${wanted}\n` +
         `  Create that folder, or fix ${key} under extra_env for "${name}" in ${PROJECTS_FILE} ` +
         `(or in ${projectEnvFile} or ${defaultEnvFile}).\n` +
         `  ${ACCEPT_CONFIG_DIR_FLAG} does not skip this check.`);
