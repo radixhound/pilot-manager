@@ -152,6 +152,24 @@ projects:
       CUSTOM_VAR: value
 ```
 
+### Claude and Codex config folders
+
+`CLAUDE_CONFIG_DIR` and `CODEX_HOME` decide which sign-in and chat history a
+pilot's chats use. Set them under `extra_env` (or in `env/<name>.env`) like any
+other variable.
+
+`install`, `restart`, `reinstall`, `register`, `setup` and `upgrade` compare the
+installed plist with the one they would write. If either folder would change,
+be added or be removed, they leave that pilot's plist and running daemon alone
+and print both values. `install`, `restart`, `reinstall`, `setup` and `upgrade`
+then exit non-zero once the other pilots are done. `register` still exits zero,
+because the new token was saved; it prints the refusal and a `reinstall` command
+to retry. To keep the installed value, put it in projects.yml or the env file.
+To take the new one, re-run with `--accept-config-dir-change`.
+
+A folder that does not exist is always refused, with or without the flag. A
+first install (no plist yet) writes whatever is configured, as before.
+
 ## Seeding a Command Center vault
 
 `seed` downloads the packaged "Command Center" vault that the FlightDeck server

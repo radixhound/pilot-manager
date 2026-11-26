@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { LAUNCHD_DIR, LOGS_DIR, ensureConfigDir } from './paths.js';
+import { LAUNCHD_DIR, LOGS_DIR, PROJECTS_FILE, ENV_DIR, ensureConfigDir } from './paths.js';
 import { loadConfig, resolveEnvVars } from './config.js';
 import { getProject, listProjects } from './registry.js';
 
@@ -327,6 +327,146 @@ ${envToDict(env)}  </dict>
 </plist>`;
 }
 
+// The Claude and Codex config folders decide which sign-in and chat history a
+// pilot's chats use. A rewrite that changes one strands every chat on that
+// pilot, so it never happens silently.
+export const GUARDED_ENV_KEYS = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME'];
+export const ACCEPT_CONFIG_DIR_FLAG = '--accept-config-dir-change';
+
+export class ConfigDirGuardError extends Error {
+  constructor(pilot, message) {
+    super(message);
+    this.name = 'ConfigDirGuardError';
+    this.pilot = pilot;
+  }
+}
+
+function unescapeXml(str) {
+  return str
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
+    .replace(/&amp;/g, '&');
+}
+
+// The EnvironmentVariables of an XML plist, as a plain object. Handles the
+// layout generatePlist writes and the one plutil/PlistBuddy write after a
+// hand edit (tabs, <string/> for an empty value). Comments are dropped and
+// CDATA sections read as text, as launchd reads them, so a commented-out
+// setting can't stand in for the active one.
+export function plistEnvironment(rawXml) {
+  // One pass, so whichever starts first wins: "<!--" inside CDATA is text,
+  // and "<![CDATA[" inside a comment is comment.
+  const xml = rawXml.replace(/<!\[CDATA\[([\s\S]*?)\]\]>|<!--[\s\S]*?-->/g,
+    (_, cdata) => (cdata === undefined ? '' : escapeXml(cdata)));
+  const block = xml.match(/<key>\s*EnvironmentVariables\s*<\/key>\s*<dict>([\s\S]*?)<\/dict>/);
+  if (!block) return {};
+  const env = {};
+  const pair = /<key>([\s\S]*?)<\/key>\s*(?:<string>([\s\S]*?)<\/string>|<string\s*\/>)/g;
+  let m;
+  while ((m = pair.exec(block[1]))) {
+    env[unescapeXml(m[1].trim())] = unescapeXml(m[2] ?? '');
+  }
+  return env;
+}
+
+function readInstalledPlist(pPath) {
+  const buf = fs.readFileSync(pPath);
+  if (buf.subarray(0, 6).toString('latin1') === 'bplist') {
+    // A binary plist (after `plutil -convert binary1`). -o - prints the XML
+    // form and leaves the file alone.
+    return execFileSync('plutil', ['-convert', 'xml1', '-o', '-', pPath], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  }
+  return buf.toString('utf8');
+}
+
+function isDirectory(p) {
+  try {
+    return fs.statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+const shown = value => (value === undefined ? '(not set)' : value);
+
+// Compare the installed plist's config folders with the ones a rewrite would
+// write. Throws ConfigDirGuardError when the rewrite must not happen:
+//   - a folder setting changed, was added, or was removed, unless
+//     acceptConfigDirChange is set;
+//   - a folder the rewrite would write does not exist (the accept flag does
+//     not skip this).
+// With no installed plist (a first install) there is nothing to protect.
+export function guardConfigDirs(name, newPlistXml, {
+  acceptConfigDirChange = false,
+  installedPath = plistPath(name),
+  isDir = isDirectory,
+} = {}) {
+  if (!fs.existsSync(installedPath)) return;
+
+  let installedEnv;
+  try {
+    installedEnv = plistEnvironment(readInstalledPlist(installedPath));
+  } catch (err) {
+    throw new ConfigDirGuardError(name,
+      `Did not touch "${name}": could not read the installed plist ${installedPath} ` +
+      `to check ${GUARDED_ENV_KEYS.join(' and ')} (${err.message}).`);
+  }
+  const wantedEnv = plistEnvironment(newPlistXml);
+  const projectEnvFile = path.join(ENV_DIR, `${name}.env`);
+  const defaultEnvFile = path.join(ENV_DIR, '_default.env');
+  const problems = [];
+
+  for (const key of GUARDED_ENV_KEYS) {
+    const installed = installedEnv[key];
+    const wanted = wantedEnv[key];
+
+    if (wanted !== undefined && !isDir(wanted)) {
+      problems.push(
+        `Did not touch "${name}": ${key} names a folder that does not exist: ${wanted}\n` +
+        `  installed plist:           ${shown(installed)}\n` +
+        `  pilot-manager would write: ${wanted}\n` +
+        `  Create that folder, or fix ${key} under extra_env for "${name}" in ${PROJECTS_FILE} ` +
+        `(or in ${projectEnvFile} or ${defaultEnvFile}).\n` +
+        `  ${ACCEPT_CONFIG_DIR_FLAG} does not skip this check.`);
+      continue;
+    }
+
+    if (installed === wanted || acceptConfigDirChange) continue;
+
+    const keep = installed === undefined
+      ? `To keep it unset, remove ${key} from extra_env for "${name}" in ${PROJECTS_FILE}, ` +
+        `and from ${projectEnvFile} and ${defaultEnvFile}.`
+      : `To keep the installed value, set ${key}: ${installed} under extra_env for "${name}" ` +
+        `in ${PROJECTS_FILE} (or ${key}=${installed} in ${projectEnvFile}).`;
+    problems.push(
+      `Did not touch "${name}": ${key} would change.\n` +
+      `  installed plist:           ${shown(installed)}\n` +
+      `  pilot-manager would write: ${shown(wanted)}\n` +
+      `  ${keep}\n` +
+      `  To accept the change, re-run with ${ACCEPT_CONFIG_DIR_FLAG}.`);
+  }
+
+  if (problems.length > 0) throw new ConfigDirGuardError(name, problems.join('\n'));
+}
+
+// The plist a (re)install would write, after the config-folder guard passes.
+// Throws before anything is unloaded or written.
+function preparePlist(name, { acceptConfigDirChange = false } = {}) {
+  const project = getProject(name);
+  if (!project) throw new Error(`Project "${name}" not found in registry`);
+
+  const config = loadConfig();
+  const plistXml = generatePlist(name, project, config);
+  guardConfigDirs(name, plistXml, { acceptConfigDirChange });
+  return plistXml;
+}
+
 export function writePlist(name, plistXml) {
   ensureConfigDir();
   const pPath = plistPath(name);
@@ -391,20 +531,16 @@ export function planServiceRefresh(status) {
   return { action: 'reinstall', installed: true };
 }
 
-export function installService(name) {
+export function installService(name, options = {}) {
   if (isServiceLoaded(name)) {
     // A bare `launchctl load` on an already-loaded job is a silent no-op —
     // it reports no error but never actually reloads a stuck or wedged
     // daemon, so `install` on a service that's already loaded must kick it
     // the same way `restart` does (unload, then load), not leave it exactly
     // as it was found. Reuse that path rather than reimplementing it here.
-    restartService(name);
+    restartService(name, options);
   } else {
-    const project = getProject(name);
-    if (!project) throw new Error(`Project "${name}" not found in registry`);
-
-    const config = loadConfig();
-    const plistXml = generatePlist(name, project, config);
+    const plistXml = preparePlist(name, options);
     writePlist(name, plistXml);
 
     try {
@@ -439,8 +575,12 @@ export function uninstallService(name) {
   removePlist(name);
 }
 
-export function restartService(name) {
+export function restartService(name, options = {}) {
   const pPath = plistPath(name);
+
+  // Build the new plist and run the config-folder guard before anything is
+  // unloaded: a refusal must leave the running daemon exactly as it was.
+  const plistXml = preparePlist(name, options);
 
   // Unload if loaded
   if (isServiceLoaded(name)) {
@@ -451,12 +591,6 @@ export function restartService(name) {
     }
   }
 
-  // Regenerate plist with current config
-  const project = getProject(name);
-  if (!project) throw new Error(`Project "${name}" not found in registry`);
-
-  const config = loadConfig();
-  const plistXml = generatePlist(name, project, config);
   writePlist(name, plistXml);
 
   try {
@@ -466,16 +600,18 @@ export function restartService(name) {
   }
 }
 
-export function installAll() {
+export function installAll(options = {}) {
   const projects = listProjects();
   const results = [];
   for (const p of projects) {
     try {
-      installService(p.name);
+      installService(p.name, options);
       const pid = getServicePid(p.name);
       results.push({ name: p.name, success: true, pid });
     } catch (err) {
-      results.push({ name: p.name, success: false, error: err.message });
+      results.push({
+        name: p.name, success: false, error: err.message, refused: err instanceof ConfigDirGuardError,
+      });
     }
   }
   return results;
